@@ -4,9 +4,9 @@ import pickle
 import yaml
 from typing import Any, Dict, List, Optional, Tuple
 import tqdm
-import io
 import lmdb
 import hashlib
+import json
 
 import torch
 from torch.utils.data import Dataset
@@ -17,7 +17,15 @@ from vint_train.data.data_utils import (
     calculate_sin_cos,
     get_data_path,
     to_local_coords,
+    IMAGE_ASPECT_RATIO,
 )
+
+
+# Increment when the cached image preprocessing changes.
+IMAGE_CACHE_VERSION = 1
+IMAGE_CACHE_BATCH_SIZE = 256
+IMAGE_CACHE_METADATA_KEY = b"__fp32_image_cache_metadata__"
+
 
 class ViNT_Dataset(Dataset):
     def __init__(
@@ -139,34 +147,71 @@ class ViNT_Dataset(Dataset):
         self._build_caches()
 
     def _build_caches(self, use_tqdm: bool = True):
-        """
-        Build a cache of images for faster loading using LMDB
-        """
+        """Cache cropped/resized CHW FP32 pixels, before ImageNet normalization."""
+        width, height = self.image_size
         cache_filename = os.path.join(
             self.data_split_folder,
-            f"dataset_{self.dataset_name}_{self._cache_id}.lmdb",
+            f"dataset_{self.dataset_name}_{self._cache_id}"
+            f"_fp32_v{IMAGE_CACHE_VERSION}_{width}x{height}.lmdb",
         )
+        self._image_cache_path = cache_filename
+        metadata = {
+            "version": IMAGE_CACHE_VERSION,
+            "dtype": "<f4",
+            "shape": [3, height, width],
+            "aspect_ratio": IMAGE_ASPECT_RATIO,
+            "resize": "PIL_BICUBIC",
+            "scale": "0_to_1",
+            "num_images": len(self.goals_index),
+        }
 
         # Load all the trajectories into memory. These should already be loaded, but just in case.
         for traj_name in self.traj_names:
             self._get_trajectory(traj_name)
 
-        """
-        If the cache file doesn't exist, create it by iterating through the dataset and writing each image to the cache
-        """
-        if not os.path.exists(cache_filename):
-            tqdm_iterator = tqdm.tqdm(
-                self.goals_index,
-                disable=not use_tqdm,
-                dynamic_ncols=True,
-                desc=f"Building LMDB cache for {self.dataset_name}"
-            )
+        complete = False
+        if os.path.exists(cache_filename):
+            with lmdb.open(cache_filename, readonly=True) as image_cache:
+                with image_cache.begin() as txn:
+                    saved = txn.get(IMAGE_CACHE_METADATA_KEY)
+                    if saved is not None:
+                        if json.loads(saved) != metadata:
+                            raise ValueError(f"FP32 image cache metadata mismatch: {cache_filename}")
+                        if txn.stat()["entries"] != metadata["num_images"] + 1:
+                            raise RuntimeError(f"Incomplete FP32 image cache: {cache_filename}")
+                        complete = True
+
+        if not complete:
+            total_bytes = len(self.goals_index) * 3 * height * width * 4
+            print(f"Preparing FP32 image cache: {cache_filename} "
+                  f"({len(self.goals_index)} images, {total_bytes / 2**30:.2f} GiB pixels)")
+            # Bounded transactions avoid retaining an entire dataset's FP32
+            # pixels in one transaction. Interrupted builds resume committed chunks.
             with lmdb.open(cache_filename, map_size=2**40) as image_cache:
+                starts = range(0, len(self.goals_index), IMAGE_CACHE_BATCH_SIZE)
+                for start in tqdm.tqdm(
+                    starts, disable=not use_tqdm, dynamic_ncols=True,
+                    desc=f"Caching FP32 images for {self.dataset_name}",
+                ):
+                    batch = self.goals_index[start:start + IMAGE_CACHE_BATCH_SIZE]
+                    with image_cache.begin(write=True) as txn:
+                        for traj_name, time in batch:
+                            image_path = get_data_path(self.data_folder, traj_name, time)
+                            key = image_path.encode()
+                            if txn.get(key) is not None:
+                                continue
+                            image = img_path_to_data(image_path, self.image_size)
+                            if tuple(image.shape) != tuple(metadata["shape"]):
+                                raise ValueError(f"Expected RGB image {metadata['shape']}, "
+                                                 f"got {tuple(image.shape)}: {image_path}")
+                            pixels = np.asarray(image.numpy(), dtype="<f4", order="C")
+                            txn.put(key, pixels.tobytes())
                 with image_cache.begin(write=True) as txn:
-                    for traj_name, time in tqdm_iterator:
-                        image_path = get_data_path(self.data_folder, traj_name, time)
-                        with open(image_path, "rb") as f:
-                            txn.put(image_path.encode(), f.read())
+                    if txn.stat()["entries"] != metadata["num_images"]:
+                        raise RuntimeError(f"FP32 image cache image count mismatch: {cache_filename}")
+                    # Only a completed cache has metadata; directory existence
+                    # alone must not make an interrupted build look complete.
+                    txn.put(IMAGE_CACHE_METADATA_KEY, json.dumps(metadata, sort_keys=True).encode())
 
         # Reopen the cache file in read-only mode
         self._image_cache: lmdb.Environment = lmdb.open(cache_filename, readonly=True)
@@ -237,15 +282,19 @@ class ViNT_Dataset(Dataset):
 
     def _load_image(self, trajectory_name, time):
         image_path = get_data_path(self.data_folder, trajectory_name, time)
-
-        try:
-            with self._image_cache.begin() as txn:
-                image_buffer = txn.get(image_path.encode())
-                image_bytes = bytes(image_buffer)
-            image_bytes = io.BytesIO(image_bytes)
-            return img_path_to_data(image_bytes, self.image_size)
-        except TypeError:
-            print(f"Failed to load image {image_path}")
+        with self._image_cache.begin() as txn:
+            image_buffer = txn.get(image_path.encode())
+        if image_buffer is None:
+            raise FileNotFoundError(f"Image missing from FP32 cache: {image_path}")
+        width, height = self.image_size
+        expected_bytes = 3 * height * width * 4
+        if len(image_buffer) != expected_bytes:
+            raise RuntimeError(f"Invalid FP32 cache entry for {image_path}: "
+                               f"{len(image_buffer)} bytes, expected {expected_bytes}")
+        # A writable copy keeps returned tensors independent of LMDB/bytes and
+        # permits callers to transform them without altering future reads.
+        pixels = np.frombuffer(image_buffer, dtype="<f4").reshape(3, height, width).copy()
+        return torch.from_numpy(pixels)
 
     def _compute_actions(self, traj_data, curr_time, goal_time):
         start_index = curr_time

@@ -19,7 +19,6 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.optimization import get_scheduler
 
 from vint_train.models.factory import build_model
-from vint_train.training.precision import validate_bf16
 
 
 from vint_train.data.vint_dataset import ViNT_Dataset
@@ -51,8 +50,6 @@ def main(config):
     device = torch.device(
         f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
     )
-    if config["model_type"] == "nomad":
-        validate_bf16(device, config.get("use_bf16", False))
 
     if "seed" in config:
         random.seed(config["seed"])
@@ -285,7 +282,6 @@ def main(config):
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
             resume_checkpoint=resume_checkpoint,
-            use_bf16=config.get("use_bf16", False),
         )
 
     print("FINISHED TRAINING")

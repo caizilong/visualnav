@@ -18,7 +18,6 @@ from torchvision import transforms
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 from vint_train.models.weights import load_model_weights, model_config
-from vint_train.training.precision import validate_bf16
 from vint_train.training.checkpoint import (
     make_nomad_checkpoint, restore_nomad_checkpoint, save_checkpoint, scheduler_state, unwrap_model,
 )
@@ -177,7 +176,6 @@ def train_eval_loop_nomad(
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
     resume_checkpoint: Optional[dict] = None,
-    use_bf16: bool = False,
 ):
     """
     Train and evaluate the model for several epochs (vint or gnm models)
@@ -203,13 +201,7 @@ def train_eval_loop_nomad(
         use_wandb: whether to log to wandb or not
         eval_fraction: fraction of training data to use for evaluation
         eval_freq: frequency of evaluation
-        use_bf16: use CUDA BF16 autocast for model/EMA forwards; losses and state stay FP32
     """
-    validate_bf16(device, use_bf16)
-    for gpu_id in getattr(model, "device_ids", []):
-        validate_bf16(torch.device("cuda", gpu_id), use_bf16)
-    unwrap_model(model).use_bf16 = use_bf16
-    print(f"NoMaD compute precision: {'BF16 autocast' if use_bf16 else 'FP32'}; parameters/EMA: FP32")
     latest_path = os.path.join(project_folder, "latest.pth")
     ema_model = EMAModel(model=model, power=0.75)
     if resume_checkpoint is not None:
@@ -220,8 +212,7 @@ def train_eval_loop_nomad(
     
     # epochs is the total target, including already completed epochs on resume.
     for epoch in range(current_epoch, epochs):
-        metrics = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"],
-                   "precision": "bf16" if use_bf16 else "fp32"}
+        metrics = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"]}
         train_metrics = {}
         if train_model:
             print(

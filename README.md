@@ -194,16 +194,6 @@ This software was tested on a LoCoBot running Ubuntu 20.04.
 
 ### Loading the model weights
 
-NoMaD training supports optional CUDA BF16 mixed precision. Set `use_bf16: true`
-in `train/config/nomad.yaml` to enable it (enabled in the supplied configuration),
-or `use_bf16: false` for FP32. Configurations without the key default to FP32.
-The switch applies to training, EMA evaluation and diagnostic/visualization
-sampling. Native CUDA BF16 support is required; unsupported devices fail with a
-message asking you to disable the switch. Startup logs and `metrics.jsonl` record
-the selected precision. Model parameters, EMA, optimizer state, losses and saved
-weights remain FP32; BF16 does not need a GradScaler. Existing checkpoints can be
-resumed with either setting, and deployment continues to load FP32 weights.
-
 Save the model weights *.pth file in `vint_release/deployment/model_weights` folder. Our model's weights are in [this link](https://drive.google.com/drive/folders/1a9yWR2iooXFAqjQHetz263--4_2FFggg?usp=sharing).
 
 ### Collecting a Topological Map
