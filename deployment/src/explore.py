@@ -82,6 +82,7 @@ def main(args: argparse.Namespace):
         ckpth_path,
         model_params,
         device,
+        use_ema=model_paths[args.model].get("use_ema", True),
     )
     model = model.to(device)
     model.eval()

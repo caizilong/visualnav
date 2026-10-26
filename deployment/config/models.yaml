@@ -13,6 +13,9 @@ gnm:
 nomad: 
   config_path: "../../train/config/nomad.yaml"
   ckpt_path: "../model_weights/nomad.pth"
+  # Complete checkpoints select EMA by default; false selects raw training weights.
+  # Plain state_dict files (latest.pth / ema_latest.pth) are loaded as saved.
+  use_ema: true
 
 
 # add your own model configs here after saving the *.pth file to ../model_weight

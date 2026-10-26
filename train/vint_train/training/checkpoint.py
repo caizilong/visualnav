@@ -7,13 +7,13 @@ import warnings
 import numpy as np
 import torch
 
+from vint_train.models.weights import (
+    checkpoint_state, load_model_weights, load_state_dict_strict, model_config, unwrap_model,
+)
+
 
 EMA_FIELDS = ("optimization_step", "decay", "update_after_step", "inv_gamma",
               "power", "min_value", "max_value")
-
-
-def unwrap_model(model):
-    return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 
 def scheduler_state(scheduler):
@@ -46,6 +46,7 @@ def make_nomad_checkpoint(model, ema_model, optimizer, scheduler, epoch):
         "format_version": 1,
         "epoch": epoch,
         "model": unwrap_model(model).state_dict(),
+        "model_config": model_config(model),
         "ema": {"model": unwrap_model(ema_model.averaged_model).state_dict(),
                 **{key: getattr(ema_model, key) for key in EMA_FIELDS}},
         "optimizer": optimizer.state_dict(),
@@ -56,16 +57,15 @@ def make_nomad_checkpoint(model, ema_model, optimizer, scheduler, epoch):
 
 def restore_nomad_checkpoint(checkpoint, model, ema_model, optimizer, scheduler):
     """Restore full checkpoints; old state_dict files remain usable for warm starts."""
+    load_model_weights(model, checkpoint, "nomad", use_ema=False)
     if "format_version" not in checkpoint:
-        unwrap_model(model).load_state_dict(checkpoint)
-        unwrap_model(ema_model.averaged_model).load_state_dict(checkpoint)
+        state, _ = checkpoint_state(checkpoint, "nomad", use_ema=False)
+        load_state_dict_strict(ema_model.averaged_model, state)
         warnings.warn("Loaded legacy NoMaD weights only: epoch, optimizer, scheduler, "
                       "EMA progress and RNG state are unavailable; starting at epoch 0.")
         return 0
-    if checkpoint["format_version"] != 1:
-        raise ValueError("Unsupported NoMaD checkpoint format")
-    unwrap_model(model).load_state_dict(checkpoint["model"])
-    unwrap_model(ema_model.averaged_model).load_state_dict(checkpoint["ema"]["model"])
+    ema_state, _ = checkpoint_state(checkpoint, "nomad", use_ema=True)
+    load_state_dict_strict(ema_model.averaged_model, ema_state)
     for key in EMA_FIELDS:
         setattr(ema_model, key, checkpoint["ema"][key])
     optimizer.load_state_dict(checkpoint["optimizer"])

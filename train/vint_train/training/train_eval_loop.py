@@ -17,6 +17,8 @@ from torchvision import transforms
 
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
+from vint_train.models.weights import load_model_weights, model_config
+from vint_train.training.precision import validate_bf16
 from vint_train.training.checkpoint import (
     make_nomad_checkpoint, restore_nomad_checkpoint, save_checkpoint, scheduler_state, unwrap_model,
 )
@@ -122,6 +124,7 @@ def train_eval_loop(
         checkpoint = {
             "epoch": epoch,
             "model": model,
+            "model_config": model_config(model),
             "optimizer": optimizer,
             "avg_total_test_loss": np.mean(avg_total_test_loss),
             "scheduler": scheduler
@@ -174,6 +177,7 @@ def train_eval_loop_nomad(
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
     resume_checkpoint: Optional[dict] = None,
+    use_bf16: bool = False,
 ):
     """
     Train and evaluate the model for several epochs (vint or gnm models)
@@ -199,7 +203,13 @@ def train_eval_loop_nomad(
         use_wandb: whether to log to wandb or not
         eval_fraction: fraction of training data to use for evaluation
         eval_freq: frequency of evaluation
+        use_bf16: use CUDA BF16 autocast for model/EMA forwards; losses and state stay FP32
     """
+    validate_bf16(device, use_bf16)
+    for gpu_id in getattr(model, "device_ids", []):
+        validate_bf16(torch.device("cuda", gpu_id), use_bf16)
+    unwrap_model(model).use_bf16 = use_bf16
+    print(f"NoMaD compute precision: {'BF16 autocast' if use_bf16 else 'FP32'}; parameters/EMA: FP32")
     latest_path = os.path.join(project_folder, "latest.pth")
     ema_model = EMAModel(model=model, power=0.75)
     if resume_checkpoint is not None:
@@ -210,7 +220,8 @@ def train_eval_loop_nomad(
     
     # epochs is the total target, including already completed epochs on resume.
     for epoch in range(current_epoch, epochs):
-        metrics = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"]}
+        metrics = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"],
+                   "precision": "bf16" if use_bf16 else "fp32"}
         train_metrics = {}
         if train_model:
             print(
@@ -299,18 +310,8 @@ def train_eval_loop_nomad(
     print()
 
 def load_model(model, model_type, checkpoint: dict) -> None:
-    """Load model from checkpoint."""
-    if model_type == "nomad":
-        state_dict = checkpoint["model"] if "format_version" in checkpoint else checkpoint
-        unwrap_model(model).load_state_dict(state_dict)
-    else:
-        loaded_model = checkpoint["model"]
-        try:
-            state_dict = loaded_model.module.state_dict()
-            model.load_state_dict(state_dict, strict=False)
-        except AttributeError as e:
-            state_dict = loaded_model.state_dict()
-            model.load_state_dict(state_dict, strict=False)
+    """Training always restores raw weights; deployment defaults to EMA."""
+    load_model_weights(model, checkpoint, model_type, use_ema=False)
 
 
 def load_ema_model(ema_model, state_dict: dict) -> None:

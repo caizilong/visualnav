@@ -18,15 +18,8 @@ from warmup_scheduler import GradualWarmupScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.optimization import get_scheduler
 
-"""
-IMPORT YOUR MODEL HERE
-"""
-from vint_train.models.gnm.gnm import GNM
-from vint_train.models.vint.vint import ViNT
-from vint_train.models.vint.vit import ViT
-from vint_train.models.nomad.nomad import NoMaD, DenseNetwork
-from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+from vint_train.models.factory import build_model
+from vint_train.training.precision import validate_bf16
 
 
 from vint_train.data.vint_dataset import ViNT_Dataset
@@ -58,6 +51,8 @@ def main(config):
     device = torch.device(
         f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
     )
+    if config["model_type"] == "nomad":
+        validate_bf16(device, config.get("use_bf16", False))
 
     if "seed" in config:
         random.seed(config["seed"])
@@ -148,81 +143,15 @@ def main(config):
             drop_last=False,
         )
 
-    # Create the model
-    if config["model_type"] == "gnm":
-        model = GNM(
-            config["context_size"],
-            config["len_traj_pred"],
-            config["learn_angle"],
-            config["obs_encoding_size"],
-            config["goal_encoding_size"],
-        )
-    elif config["model_type"] == "vint":
-        model = ViNT(
-            context_size=config["context_size"],
-            len_traj_pred=config["len_traj_pred"],
-            learn_angle=config["learn_angle"],
-            obs_encoder=config["obs_encoder"],
-            obs_encoding_size=config["obs_encoding_size"],
-            late_fusion=config["late_fusion"],
-            mha_num_attention_heads=config["mha_num_attention_heads"],
-            mha_num_attention_layers=config["mha_num_attention_layers"],
-            mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        )
-    elif config["model_type"] == "nomad":
-        if config["vision_encoder"] == "nomad_vint":
-            vision_encoder = NoMaD_ViNT(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
-        elif config["vision_encoder"] == "vib": 
-            vision_encoder = ViB(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
-        elif config["vision_encoder"] == "vit": 
-            vision_encoder = ViT(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                image_size=config["image_size"],
-                patch_size=config["patch_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-            )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
-        else: 
-            raise ValueError(f"Vision encoder {config['vision_encoder']} not supported")
-            
-        noise_pred_net = ConditionalUnet1D(
-                input_dim=2,
-                global_cond_dim=config["encoding_size"],
-                down_dims=config["down_dims"],
-                cond_predict_scale=config["cond_predict_scale"],
-            )
-        dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-        
-        model = NoMaD(
-            vision_encoder=vision_encoder,
-            noise_pred_net=noise_pred_net,
-            dist_pred_net=dist_pred_network,
-        )
-
+    # Training and deployment must construct exactly the same architecture.
+    model = build_model(config)
+    if config["model_type"] == "nomad":
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=config["num_diffusion_iters"],
-            beta_schedule='squaredcos_cap_v2',
+            beta_schedule="squaredcos_cap_v2",
             clip_sample=True,
-            prediction_type='epsilon'
+            prediction_type="epsilon",
         )
-    else:
-        raise ValueError(f"Model {config['model']} not supported")
 
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
@@ -356,6 +285,7 @@ def main(config):
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
             resume_checkpoint=resume_checkpoint,
+            use_bf16=config.get("use_bf16", False),
         )
 
     print("FINISHED TRAINING")
