@@ -2,10 +2,10 @@ project_name: nomad
 run_name: nomad
 
 # training setup
-use_wandb: True # set to false if you don't want to log to wandb
+use_wandb: False # set to false if you don't want to log to wandb
 train: True
 batch_size: 64
-# eval_batch_size: 32 # optional override; defaults to batch_size
+eval_batch_size: 32 # optional override; defaults to batch_size
 epochs: 100
 gpu_ids: [0]
 num_workers: 12
@@ -44,7 +44,7 @@ normalize: True
 
 # context
 context_type: temporal
-context_size: 3 # 5
+context_size: 5 # 5
 alpha: 1e-4
 
 # distance bounds for distance and action and distance predictions 
@@ -62,27 +62,27 @@ learn_angle: False
 # dataset specific parameters
 image_size: [96, 96] # width, height
 datasets:
-  # recon:
-  #   data_folder: /home/<username>/nomad_dataset/recon
-  #   train: /home/<username>/data_splits/recon/train/ # path to train folder with traj_names.txt
-  #   test: /home/<username>/data_splits/recon/test/ # path to test folder with traj_names.txt
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1 # how many goals are sampled per observation
-  #   negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  recon:
+    data_folder: /home/czl/visualnav/datasets/recon
+    train: /home/czl/visualnav/train/vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
+    test: /home/czl/visualnav/train/vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1 # how many goals are sampled per observation
+    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
   go_stanford:
-    data_folder: /home/czl/visualnav/train/datasets/go_stanford # datasets/stanford_go_new
+    data_folder: /home/czl/visualnav/datasets/go_stanford
     train: /home/czl/visualnav/train/vint_train/data/data_splits/go_stanford/train/
     test: /home/czl/visualnav/train/vint_train/data/data_splits/go_stanford/test/
     end_slack: 0
     goals_per_obs: 2 # increase dataset size
     negative_mining: True
-  # cory_hall:
-  #   data_folder: /home/<username>/nomad_dataset/cory_hall/
-  #   train: /home/<username>/data_splits/cory_hall/train/
-  #   test: /home/<username>/data_splits/cory_hall/test/
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1
-  #   negative_mining: True
+  cory_hall:
+    data_folder: /home/czl/visualnav/datasets/cory_hall/
+    train: /home/czl/visualnav/train/vint_train/data/data_splits/cory_hall/train/
+    test: /home/czl/visualnav/train/vint_train/data/data_splits/cory_hall/test/
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1
+    negative_mining: True
   # tartan_drive:
   #   data_folder: /home/<username>/nomad_dataset/tartan_drive/
   #   train: /home/<username>/data_splits/tartan_drive/train/
@@ -98,20 +98,20 @@ datasets:
   #   goals_per_obs: 1
   #   negative_mining: True
   # private datasets (uncomment if you have access)
-  # seattle:
-  #   data_folder: /home/<username>/nomad_dataset/seattle/
-  #   train: /home/<username>/data_splits/seattle/train/
-  #   test: /home/<username>/data_splits/seattle/test/
-  #   end_slack: 0
-  #   goals_per_obs: 1
-  #   negative_mining: True
-  # scand:
-  #   data_folder: /home/<username>/nomad_dataset/scand/
-  #   train: /home/<username>/data_splits/scand/train/
-  #   test: /home/<username>/data_splits/scand/test/
-  #   end_slack: 0
-  #   goals_per_obs: 1
-  #   negative_mining: True
+  seattle:
+    data_folder: /home/czl/visualnav/datasets/seattle/
+    train: /home/czl/visualnav/train/vint_train/data/data_splits/seattle/train/
+    test: /home/czl/visualnav/train/vint_train/data/data_splits/seattle/test/
+    end_slack: 0
+    goals_per_obs: 1
+    negative_mining: True
+  scand:
+    data_folder: /home/czl/visualnav/datasets/scand/
+    train: /home/czl/visualnav/train/vint_train/data/data_splits/scand/train/
+    test: /home/czl/visualnav/train/vint_train/data/data_splits/scand/test/
+    end_slack: 0
+    goals_per_obs: 1
+    negative_mining: True
 
 # logging stuff
 ## =0 turns off
