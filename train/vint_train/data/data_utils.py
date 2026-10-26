@@ -93,17 +93,29 @@ def calculate_sin_cos(waypoints: torch.Tensor) -> torch.Tensor:
     return torch.concat((waypoints[:, :2], angle_repr), axis=1)
 
 
+def center_crop_to_aspect_ratio(
+    img: Image.Image, aspect_ratio: float = IMAGE_ASPECT_RATIO
+) -> Image.Image:
+    """Crop centrally to width/height = aspect_ratio without padding."""
+    if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+        raise ValueError("aspect_ratio must be finite and positive")
+    w, h = img.size
+    if w / h > aspect_ratio:
+        crop_size = (h, max(1, min(w, int(h * aspect_ratio))))
+    elif w / h < aspect_ratio:
+        crop_size = (max(1, min(h, int(w / aspect_ratio))), w)
+    else:
+        return img
+    return TF.center_crop(img, crop_size)
+
+
 def transform_images(
     img: Image.Image, transform: transforms, image_resize_size: Tuple[int, int], aspect_ratio: float = IMAGE_ASPECT_RATIO
 ):
-    w, h = img.size
-    if w > h:
-        img = TF.center_crop(img, (h, int(h * aspect_ratio)))  # crop to the right ratio
-    else:
-        img = TF.center_crop(img, (int(w / aspect_ratio), w))
-    viz_img = img.resize(VISUALIZATION_IMAGE_SIZE)
+    img = center_crop_to_aspect_ratio(img, aspect_ratio)
+    viz_img = img.resize(VISUALIZATION_IMAGE_SIZE, resample=Image.BICUBIC)
     viz_img = TF.to_tensor(viz_img)
-    img = img.resize(image_resize_size)
+    img = img.resize(image_resize_size, resample=Image.BICUBIC)
     transf_img = transform(img)
     return viz_img, transf_img
 
@@ -111,12 +123,9 @@ def transform_images(
 def resize_and_aspect_crop(
     img: Image.Image, image_resize_size: Tuple[int, int], aspect_ratio: float = IMAGE_ASPECT_RATIO
 ):
-    w, h = img.size
-    if w > h:
-        img = TF.center_crop(img, (h, int(h * aspect_ratio)))  # crop to the right ratio
-    else:
-        img = TF.center_crop(img, (int(w / aspect_ratio), w))
-    img = img.resize(image_resize_size)
+    """Center crop to 4:3 by default, resize (width, height), and tensorize."""
+    img = center_crop_to_aspect_ratio(img, aspect_ratio)
+    img = img.resize(image_resize_size, resample=Image.BICUBIC)
     resize_img = TF.to_tensor(img)
     return resize_img
 

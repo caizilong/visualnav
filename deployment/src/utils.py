@@ -25,7 +25,7 @@ from vint_train.models.vint.vit import ViT
 from vint_train.models.nomad.nomad import NoMaD, DenseNetwork
 from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
-from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
+from vint_train.data.data_utils import resize_and_aspect_crop
 
 
 def load_model(
@@ -132,26 +132,19 @@ def to_numpy(tensor):
 
 
 def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], center_crop: bool = False) -> torch.Tensor:
-    """Transforms a list of PIL image to a torch tensor."""
-    transform_type = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                                    0.229, 0.224, 0.225]),
-        ]
+    """Normalize and stack images; center_crop=True uses training's 4:3 crop/resize."""
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     )
     if type(pil_imgs) != list:
         pil_imgs = [pil_imgs]
     transf_imgs = []
     for pil_img in pil_imgs:
-        w, h = pil_img.size
         if center_crop:
-            if w > h:
-                pil_img = TF.center_crop(pil_img, (h, int(h * IMAGE_ASPECT_RATIO)))  # crop to the right ratio
-            else:
-                pil_img = TF.center_crop(pil_img, (int(w / IMAGE_ASPECT_RATIO), w))
-        pil_img = pil_img.resize(image_size) 
-        transf_img = transform_type(pil_img)
+            image_tensor = resize_and_aspect_crop(pil_img, image_size)
+        else:
+            image_tensor = TF.to_tensor(pil_img.resize(image_size))
+        transf_img = normalize(image_tensor)
         transf_img = torch.unsqueeze(transf_img, 0)
         transf_imgs.append(transf_img)
     return torch.cat(transf_imgs, dim=1)

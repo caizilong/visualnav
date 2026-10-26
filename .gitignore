@@ -1,5 +1,6 @@
 train/logs/*
 train/datasets/*
+/datasets/
 train/vint_train/data/data_splits/*
 train/wandb/*
 train/gnm_dataset/*

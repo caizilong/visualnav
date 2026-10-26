@@ -132,7 +132,7 @@ def main(args: argparse.Namespace):
         chosen_waypoint = np.zeros(4)
         if len(context_queue) > model_params["context_size"]:
             if model_params["model_type"] == "nomad":
-                obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
+                obs_images = transform_images(context_queue, model_params["image_size"], center_crop=True)
                 obs_images = torch.split(obs_images, 3, dim=1)
                 obs_images = torch.cat(obs_images, dim=1) 
                 obs_images = obs_images.to(device)
@@ -140,7 +140,7 @@ def main(args: argparse.Namespace):
 
                 start = max(closest_node - args.radius, 0)
                 end = min(closest_node + args.radius + 1, goal_node)
-                goal_image = [transform_images(g_img, model_params["image_size"], center_crop=False).to(device) for g_img in topomap[start:end + 1]]
+                goal_image = [transform_images(g_img, model_params["image_size"], center_crop=True).to(device) for g_img in topomap[start:end + 1]]
                 goal_image = torch.concat(goal_image, dim=0)
 
                 obsgoal_cond = model('vision_encoder', obs_img=obs_images.repeat(len(goal_image), 1, 1, 1), goal_img=goal_image, input_goal_mask=mask.repeat(len(goal_image)))
