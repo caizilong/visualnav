@@ -2,7 +2,7 @@ project_name: nomad
 run_name: nomad
 
 # training setup
-use_wandb: False # set to false if you don't want to log to wandb
+use_wandb: False # epoch metrics are still saved locally without W&B
 train: True
 batch_size: 128
 eval_batch_size: 64 # optional override; defaults to batch_size
@@ -115,7 +115,7 @@ datasets:
 
 # logging stuff
 ## =0 turns off
-print_log_freq: 0 # in iterations
+print_log_freq: 500 # in iterations
 image_log_freq: 10000 #0 # in iterations
 num_images_log: 2 #0 
 pairwise_test_freq: 0 # in epochs
