@@ -17,7 +17,7 @@ from vint_train.inference.goal_relation_selector import (choose_subgoal, localiz
                                                         prepare_route_decision, legal_candidate_nodes)
 from vint_train.inference.calibration import load_calibration, selector_spec
 from .simulation_train import collect_relations, finite_json
-from .relation_metrics import binary_metrics, choose_threshold
+from .relation_metrics import binary_metrics, choose_threshold, distance_metrics
 
 
 def fit_temperature(logits, targets):
@@ -104,21 +104,19 @@ def decision_report(rows, predictions, temperature, threshold, settings):
     return totals
 
 
-def report(rows, predictions, temperature, threshold, settings):
+def report(rows, predictions, temperature, threshold, settings, distance_head_trained=True):
     p = torch.sigmoid(torch.tensor(predictions["logit"], dtype=torch.float64) / temperature).numpy()
     known = np.asarray(predictions["reach_valid"], bool)
-    valid_d = np.asarray(predictions["distance_valid"], bool)
     accepted_known_indices = np.flatnonzero(known & (p >= threshold))
     accepted_indices = np.flatnonzero(p >= threshold)
     metrics = binary_metrics(p[known], np.asarray(predictions["target"])[known], threshold)
-    errors = np.abs(np.asarray(predictions["distance_m"])[valid_d] - np.asarray(predictions["target_distance_m"])[valid_d])
     return {"candidate_metrics": metrics, "unknown_count": int((~known).sum()),
             "accepted_unknown_count": int(((~known) & (p >= threshold)).sum()),
             "accepted_scene_count": len({rows[i]["scene_id"] for i in accepted_indices}),
             "accepted_episode_count": len({(rows[i]["scene_id"], rows[i]["episode_id"]) for i in accepted_indices}),
             "accepted_known_scene_count": len({rows[i]["scene_id"] for i in accepted_known_indices}),
             "accepted_known_episode_count": len({(rows[i]["scene_id"], rows[i]["episode_id"]) for i in accepted_known_indices}),
-            "distance_valid_count": int(valid_d.sum()), "distance_MAE_m": float(errors.mean()) if len(errors) else None,
+            **distance_metrics(predictions, distance_head_trained),
             "decisions": decision_report(rows, predictions, temperature, threshold, settings)}
 
 
@@ -147,6 +145,7 @@ def main():
         raise ValueError("The dataset/split fingerprint changed since training")
     model = load_model(args.checkpoint, config, torch.device(args.device), use_ema=args.weights == "ema")
     settings = selector_spec(config)
+    distance_head_trained = config.get("r3", {}).get("lambda_distance", 1.) > 0
     def collect(split):
         rows = bundle["relations"][split]
         if not rows:
@@ -161,7 +160,7 @@ def main():
         rows, predictions = collect(args.split)
         output = {"status": "evaluated", "split": args.split,
                   "weights_sha256": model._weights_sha256,
-                  "report": report(rows, predictions, artifact["temperature"], artifact["threshold"], settings)}
+                  "report": report(rows, predictions, artifact["temperature"], artifact["threshold"], settings, distance_head_trained)}
     else:
         try:
             temp_rows, temp = collect("calibration_temperature")
@@ -179,8 +178,8 @@ def main():
                       "data_fingerprint": bundle["fingerprint"], "max_empirical_fdr": args.max_fdr,
                       "min_accepted": args.min_accepted,
                       "temperature_fit_count": int(np.asarray(temp["reach_valid"]).sum()),
-                      "report": report(rows, predictions, temperature, threshold, settings),
-                      "uncalibrated_report": report(rows, predictions, 1., .5, settings),
+                      "report": report(rows, predictions, temperature, threshold, settings, distance_head_trained),
+                      "uncalibrated_report": report(rows, predictions, 1., .5, settings, distance_head_trained),
                       "guarantee": "none; empirical held-out metrics only"}
         except (ValueError, KeyError, TypeError) as exc:
             output = {"schema_version": 1, "status": "failed", "reason": str(exc)}

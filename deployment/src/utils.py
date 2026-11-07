@@ -1,41 +1,18 @@
 
-import os
-import sys
-import io
-import matplotlib.pyplot as plt
-
-# ROS
-from sensor_msgs.msg import Image
+from ros2_images import msg_to_pil, pil_to_msg
 
 # pytorch
 import torch
-import torch.nn as nn
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 
 import numpy as np
 from PIL import Image as PILImage
-from typing import List, Tuple, Dict, Optional
+from typing import List
 
 # Shared loader deliberately has no ROS or training/logging dependencies.
 from vint_train.models.weights import load_model
 from vint_train.data.data_utils import resize_and_aspect_crop
-
-
-def msg_to_pil(msg: Image) -> PILImage.Image:
-    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-        msg.height, msg.width, -1)
-    pil_image = PILImage.fromarray(img)
-    return pil_image
-
-
-def pil_to_msg(pil_img: PILImage.Image, encoding="mono8") -> Image:
-    img = np.asarray(pil_img)  
-    ros_image = Image(encoding=encoding)
-    ros_image.height, ros_image.width, _ = img.shape
-    ros_image.data = img.ravel().tobytes() 
-    ros_image.step = ros_image.width
-    return ros_image
 
 
 def to_numpy(tensor):

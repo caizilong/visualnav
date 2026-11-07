@@ -9,6 +9,11 @@ IMAGE_TOPIC = "/usb_cam/image_raw"
 SUBGOALS_TOPIC = "/subgoals"
 GRAPH_NAME_TOPIC = "/graph_name"
 WAYPOINT_TOPIC = "/waypoint"
+# Atomic metric command: Float32MultiArray [prediction_time_s, x_m, y_m].
+# Kept separate from legacy /waypoint, whose coordinates use another scale.
+METRIC_WAYPOINT_TOPIC = "/topoplan/metric_waypoint"
+WAYPOINT_TIME_TOPIC = "/topoplan/waypoint_time_s"
+STOP_TOPIC = "/topoplan/r3_stop"
 REVERSE_MODE_TOPIC = "/reverse_mode"
 SAMPLED_OUTPUTS_TOPIC = "/sampled_outputs"
 REACHED_GOAL_TOPIC = "/topoplan/reached_goal"

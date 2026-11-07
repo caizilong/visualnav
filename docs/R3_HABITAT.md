@@ -1,6 +1,6 @@
 # R3：Habitat 从零联合训练
 
-本实现是代码交付，尚未在 Ubuntu / CUDA / Habitat / ROS 中执行测试或训练。模板的 batch、学习率、100 epochs 均是初始配置，不代表已测得的显存、耗时或论文效果。
+已完成 R3 单测；此前合成数据的训练、恢复、AMP、校准和推理 smoke 已通过。部署入口现使用 ROS 2 Humble / Python 3.10，环境和启动方法见 [部署说明](../deployment/README.md)。这些检查不代表真实 Habitat 闭环或实机验收通过；模板的 batch、学习率、100 epochs 仍是初始配置，不代表已测得的论文效果。
 
 ## 1. 入口与范围
 
@@ -8,13 +8,13 @@
 - 数据：`data/simulation.py`、`prepare_sim_data.py`、`goal_relation_dataset.py`；动作流复用 `ViNT_Dataset` 和 FP32 图像缓存。
 - 模型：`models/nomad/goal_relation_head.py`；共享 MLP 为 256→128→64，输出 R logit 与 `H * Softplus(z_D)`。
 - 训练：`training/goal_relation_train.py`、`simulation_train.py`、`simulation_checkpoint.py`。
-- 校准：`training/calibrate_r3.py`；通用推理：`inference/`；ROS 参考：`deployment/src/r3_navigate.py`。
+- 校准：`training/calibrate_r3.py`；通用推理：`inference/`；ROS 2 接口：`deployment/src/r3_navigate.py`。
 
-整个有效网络随机初始化、参与优化，包括两路 EfficientNet、Transformer、原距离头、扩散 U-Net 和 R3。原实现注册但前向未使用的 EfficientNet `_fc` 和 Transformer 模板 `sa_layer` 为兼容旧权重保留；其名称写入 `provenance.json`，不虚报梯度。R-only 消融关闭 D 损失和 D 排序，其 D 输出层不构成有效任务。
+整个有效网络随机初始化、参与优化，包括两路 EfficientNet、Transformer、原距离头、扩散 U-Net 和 R3。原实现注册但前向未使用的 EfficientNet `_fc` 和 Transformer 模板 `sa_layer` 为兼容旧权重保留；其名称写入 `provenance.json`，不虚报梯度。R-only 消融关闭 D 损失和 D 排序，其 D 输出层不构成有效任务。验证和校准报告保留 distance_valid_count，但将 distance_MAE_m 设为 null，并用 distance_head_trained=false 明确标记。
 
 R3 关闭、且未配置仿真尺度时，原模型结构、原训练入口和旧推理权重路径保留。新实验不调用旧权重迁移。`resume_from` / `--resume` 只接受同配置的完整 v2 checkpoint。
 
-本轮没有采集器、路径标签生成器、CARLA 适配或 Habitat 控制驱动。现有 Habitat 实验环境需要按以下协议导出数据，并调用通用 RGB 推理/选择接口。ROS 文件只是接入参考，不要求实机实验。
+本轮没有采集器、路径标签生成器、CARLA 适配或 Habitat 控制驱动。现有 Habitat 实验环境需要按以下协议导出数据，并调用通用 RGB 推理/选择接口。ROS 2 节点提供消息接入，不要求实机实验。
 
 ## 2. 数据准备
 
@@ -39,7 +39,7 @@ habitat/
 
 坐标必须已从 Habitat 转为 `nomad_xy_ccw`：世界平面使用一致的 X/Y，yaw 从 +X 朝 +Y 逆时针增加；机器人局部 +x 向前、+y 向左。局部坐标计算为 `(p - p_t) @ [[cos(yaw), -sin(yaw)], [sin(yaw), cos(yaw)]]`。不要直接把 Habitat 三维位置/四元数填入平面轨迹；本实现不猜测你的坐标转换。
 
-`waypoint_spacing=s` 表示每隔 s 个导出帧取一个上下文帧/预测点。`action_time_step_s` 是相邻预测 waypoint 的实际时间间隔，原始导出帧间隔因此为 `action_time_step_s/s`。关系流的历史 RGB 也必须遵守这一采样协议，顺序为最旧到当前，共 `context_size+1` 张。推理 RGB 流必须采用同样的原始帧节奏；ROS 参考按 s 抽帧。
+`waypoint_spacing=s` 表示每隔 s 个导出帧取一个上下文帧/预测点。`action_time_step_s` 是相邻预测 waypoint 的实际时间间隔，原始导出帧间隔因此为 `action_time_step_s/s`。关系流的历史 RGB 也必须遵守这一采样协议，顺序为最旧到当前，共 `context_size+1` 张。推理 RGB 流必须采用同样的原始帧节奏；ROS 2 接口按 s 抽帧。
 
 `action_scale_m` 是局部米制 waypoint 除以的尺度。统计工具在除以该尺度后计算 delta 范围，扩散输出解码时乘回同一尺度。它不从机器人 `MAX_V / RATE` 推断。`resolved_config.yaml` 和 v2 checkpoint 保存尺度、时间间隔、stride、统计范围及尺度指纹。
 
@@ -138,25 +138,25 @@ python -m vint_train.training.calibrate_r3 \
 
 `base_accept_rate`、`fallback_rate`、`distance_changed_selection_rate` 的分母为全部决策；fallback_rate 包含尝试替代后仍全部拒绝的情况。`distance_changed_selection_rate_on_fallback` 的分母为实际选中替代目标的决策。D 改选用同模型、同候选集合的路线顺序选择作对照；它不等价于另训的 R-only 闭环消融。拒绝、异常、超时和失败独立计数。
 
-### ROS 参考接入
+### ROS 2 接入
 
 把 checkpoint 与同次实验的 `resolved_config.yaml` 放到 `deployment/config/models.yaml` 的 `nomad_r3` 所指位置；不能用尚未填数据参数的训练模板作部署配置。在 `deployment/src` 下启动：
 
 ```bash
-python pd_controller.py
+python pd_controller.py --control-mode metric
 python navigate.py --model nomad_r3 --dir YOUR_TOPOMAP \
   --calibration /path/to/calibration.json --decision-log /path/to/decisions.jsonl
 ```
 
 topomap RGB 文件为 `0.jpg` 起的连续数字索引，旁边可放 `route.json`（格式见 route 示例）。`--radius` 与 `--close-threshold` 必须和校准设置一致。`--allow-uncalibrated` 仅供显式调试，日志记录 calibrated=false。
 
-导航发布米制 waypoint 和 `/topoplan/waypoint_time_s`，后者为 `(waypoint_index+1)*action_time_step_s`；PD 控制器读取此预测时间计算速度并应用机器人速度上限。这个接口不再使用 `MAX_V / RATE` 做 waypoint 尺度换算。
+导航和 exploration 均在 `/topoplan/metric_waypoint` 发布一条 `Float32MultiArray [prediction_time_s, x_m, y_m]`；预测时间为 `(waypoint_index+1)*action_time_step_s`。PD 控制器使用同一条消息中的坐标和时间计算速度，再应用机器人速度上限。`/waypoint` 和 `/topoplan/waypoint_time_s` 继续提供观测接口。启动 controller 时明确使用 `--control-mode metric`，切回 legacy 时重启并使用 `--control-mode legacy`；包装脚本会自动根据模型配置选择模式。
 
-`/topoplan/r3_stop` 为带心跳的停止信号，控制器在停止、心跳中断、waypoint 过期或缺预测时间时输出零速度，并清空旧 waypoint。独立墙钟 watchdog 不依赖 ROS 模拟时间推进。ROS 图像必须有递增 header stamp（或 stamp=0 时递增 seq），重传同一标识不计新帧；不同 episode 时间戳重置时先发 reset。`/topoplan/reset_episode`（std_msgs/Empty）清空拒绝计数、图像历史、定位/前沿和失败状态。`/topoplan/r3_status` 与 JSONL 记录状态转移，图像中断即使没有后续决策也会留记录。拒绝/失败不发布到达成功，且不发布旧 waypoint。
+`/topoplan/r3_stop` 为带心跳的停止信号，控制器在停止、心跳中断、waypoint 过期或缺预测时间时输出零速度，并清空旧 waypoint。独立墙钟 watchdog 不依赖 ROS 模拟时间推进。ROS 2 图像必须有正数且递增的 header stamp.sec/nanosec（没有 header.seq），零时间戳或重传同一标识不计新帧；不同 episode 时间戳重置时先发 reset。`/topoplan/reset_episode`（std_msgs/Empty）清空拒绝计数、图像历史、定位/前沿和失败状态。`/topoplan/r3_status` 与 JSONL 记录状态转移，图像中断即使没有后续决策也会留记录。拒绝/失败不发布到达成功，且不发布旧 waypoint。
 
 到达状态独立于选择状态：最终节点需原距离头判断 close，且没有跳过必经节点/断点、R3 没有拒绝，才发布 reached_goal。Habitat 的真正成功、碰撞、SPL 等仍由仿真评估器根据真值判断；视觉定位得到的 reached_goal 不能代替论文真值成功率。
 
-## 5. Ubuntu 验收清单（待执行）
+## 5. 测试与真实环境验收
 
 在已有训练环境、`visualnav/train` 目录运行新增的轻量测试：
 
@@ -164,7 +164,7 @@ topomap RGB 文件为 `0.jpg` 起的连续数字索引，旁边可放 `route.jso
 python -m unittest discover -s tests -p 'test_r3_*.py' -v
 ```
 
-这些脚本未在本轮运行。除脚本外，还需要以下真实环境检查：
+2026-11-08 验证：21 个 R3 训练侧测试、10 个 ROS 2 部署侧测试通过；部署测试包含真实 DDS、合成 RGB、小模型 checkpoint 实际推理，以及图像中断和模拟时钟暂停时的停车检查。以下列表保留为真实数据、真实闭环和实机的验收要求，不因单测或合成数据 smoke 通过而视为全部完成：
 
 1. 用小份真实 Habitat 导出验证坐标、相机帧序、scene 划分和最短路标签；注入超时、错误投影、跨流 scene 泄漏应报错/标未知。
 2. 检查训练启动没有下载/读取预训练权重；相同 seed 的公共初始化相同。动作、temporal、R、D 分别有有效监督，各有效模块梯度有限且非空；兼容性未使用参数按 provenance 排除。

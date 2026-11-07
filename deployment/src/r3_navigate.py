@@ -1,4 +1,4 @@
-"""ROS reference adapter for scratch simulation checkpoints (all geometry stays offline)."""
+"""ROS 2 adapter for scratch simulation checkpoints (all geometry stays offline)."""
 
 from collections import deque
 import json
@@ -8,14 +8,15 @@ import threading
 import time
 
 import numpy as np
-import rospy
 import torch
 from PIL import Image as PILImage
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Empty, Float32, Float32MultiArray, String
 
-from utils import msg_to_pil
-from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC, REACHED_GOAL_TOPIC
+from ros2_images import image_stamp_ns, msg_to_pil
+from ros2_runtime import ROS2Runtime
+from topic_names import (IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC, REACHED_GOAL_TOPIC,
+                         METRIC_WAYPOINT_TOPIC, WAYPOINT_TIME_TOPIC, STOP_TOPIC)
 from vint_train.data.data_utils import resize_and_aspect_crop
 from vint_train.inference.calibration import load_calibration, selector_spec
 from vint_train.inference.goal_relation_selector import (GoalRelationSelector, localization_window,
@@ -23,12 +24,16 @@ from vint_train.inference.goal_relation_selector import (GoalRelationSelector, l
 from vint_train.inference.rgb_policy import score_rgb_pairs, sample_conditioned_actions
 
 
-STOP_TOPIC = "/topoplan/r3_stop"
 STATUS_TOPIC = "/topoplan/r3_status"
 RESET_TOPIC = "/topoplan/reset_episode"
 
 
 def run_navigation(args, model, config, topomap_root, device):
+    with ROS2Runtime("r3_navigation") as ros:
+        return _run_navigation(args, model, config, topomap_root, device, ros)
+
+
+def _run_navigation(args, model, config, topomap_root, device, ros):
     spec = selector_spec(config)
     if args.radius != spec["radius"] or args.close_threshold != spec["close_threshold"]:
         raise ValueError("CLI radius/close-threshold must match the saved decision settings")
@@ -68,13 +73,14 @@ def run_navigation(args, model, config, topomap_root, device):
              "closest": 0, "completed": -1, "reached": False, "episode": 0, "image_identity": None}
     stride = config.get("observation_stride", 1)
     stop_event = threading.Event()
-    rospy.init_node("R3_NAVIGATION", anonymous=False)
-    waypoint_pub = rospy.Publisher(WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)
-    samples_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
-    goal_pub = rospy.Publisher(REACHED_GOAL_TOPIC, Bool, queue_size=1, latch=True)
-    stop_pub = rospy.Publisher(STOP_TOPIC, Bool, queue_size=1, latch=True)
-    duration_pub = rospy.Publisher("/topoplan/waypoint_time_s", Float32, queue_size=1, latch=True)
-    status_pub = rospy.Publisher(STATUS_TOPIC, String, queue_size=1, latch=True)
+    waypoint_pub = ros.publisher(Float32MultiArray, WAYPOINT_TOPIC)
+    metric_pub = ros.publisher(Float32MultiArray, METRIC_WAYPOINT_TOPIC)
+    samples_pub = ros.publisher(Float32MultiArray, SAMPLED_ACTIONS_TOPIC)
+    goal_pub = ros.publisher(Bool, REACHED_GOAL_TOPIC, state=True)
+    stop_pub = ros.publisher(Bool, STOP_TOPIC)
+    duration_pub = ros.publisher(Float32, WAYPOINT_TIME_TOPIC, state=True)
+    status_pub = ros.publisher(String, STATUS_TOPIC, state=True)
+    duration = float((args.waypoint + 1) * model._model_config["action_time_step_s"])
     log_path = Path(args.decision_log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -95,10 +101,12 @@ def run_navigation(args, model, config, topomap_root, device):
 
     def observation_callback(message):
         with lock:
-            stamp = message.header.stamp.to_nsec()
-            identity = ("stamp", stamp) if stamp > 0 else ("seq", message.header.seq)
+            stamp = image_stamp_ns(message)
+            if stamp <= 0:
+                return  # ROS 2 has no header.seq; require stamped camera frames.
+            identity = stamp
             last = state["image_identity"]
-            if last is not None and identity[0] == last[0] and identity[1] <= last[1]:
+            if last is not None and identity <= last:
                 return  # Retransmitted/stale frames cannot count as new rejections.
             image = msg_to_pil(message).convert("RGB")
             state["image_identity"] = identity
@@ -114,7 +122,7 @@ def run_navigation(args, model, config, topomap_root, device):
             selector.reset_episode()
             queue.clear()
             state.update(closest=0, completed=-1, reached=False, last_raw_time=None,
-                         episode=state["episode"] + 1, image_identity=None)
+                         episode=state["episode"] + 1, image_identity=None, frame_id=0, sampled_frame_id=0)
             goal_pub.publish(Bool(data=False))
             publish_stop()
             write_record({"event": "reset", "episode": state["episode"],
@@ -122,7 +130,7 @@ def run_navigation(args, model, config, topomap_root, device):
 
     def watchdog():
         last_status = None
-        while not stop_event.wait(.05) and not rospy.is_shutdown():
+        while not stop_event.wait(.05) and ros.ok():
             with lock:
                 if state["reached"]:
                     publish_stop()
@@ -144,17 +152,17 @@ def run_navigation(args, model, config, topomap_root, device):
                                   "reason": status["reason"], "metrics": selector.metrics()})
                     last_status = current
 
-    rospy.Subscriber(IMAGE_TOPIC, Image, observation_callback, queue_size=1)
-    rospy.Subscriber(RESET_TOPIC, Empty, reset_callback, queue_size=1)
+    ros.subscribe(Image, IMAGE_TOPIC, observation_callback, image=True)
+    ros.subscribe(Empty, RESET_TOPIC, reset_callback)
     goal_pub.publish(Bool(data=False))
     publish_stop()
-    duration_pub.publish(Float32(data=(args.waypoint + 1) * config["action_time_step_s"]))
+    duration_pub.publish(Float32(data=duration))
     thread = threading.Thread(target=watchdog, daemon=True)
     thread.start()
     last_processed = None
     print(f"R3={enabled}, calibrated={calibrated}, action_scale_m={config['action_scale_m']}; RGB only")
     try:
-        while not rospy.is_shutdown():
+        while ros.ok():
             with lock:
                 key = (state["episode"], state["sampled_frame_id"])
                 ready = len(queue) == config["context_size"] + 1 and key != last_processed and not state["reached"] and not selector.failed
@@ -211,7 +219,9 @@ def run_navigation(args, model, config, topomap_root, device):
                     selector.tick()
                     if state["episode"] == episode and not selector.failed and not state["reached"]:
                         stop_pub.publish(Bool(data=False))
+                        duration_pub.publish(Float32(data=duration))
                         samples_pub.publish(Float32MultiArray(data=np.concatenate(([0.], samples.ravel())).tolist()))
+                        metric_pub.publish(Float32MultiArray(data=[duration, *waypoint.tolist()]))
                         waypoint_pub.publish(Float32MultiArray(data=waypoint.tolist()))
                         executed = True
                     else:

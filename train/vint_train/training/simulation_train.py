@@ -27,7 +27,7 @@ from .checkpoint import save_checkpoint
 from .simulation_checkpoint import make_sim_checkpoint, restore_sim_checkpoint
 from .goal_relation_train import (action_loss_sums, relation_loss_sums, relation_weight,
                                   window_denominators, weighted_loss, optimizer_update)
-from .relation_metrics import binary_metrics
+from .relation_metrics import binary_metrics, distance_metrics
 
 
 def seed_all(seed):
@@ -316,11 +316,10 @@ def evaluate(model, action_dataset, relation_dataset, config, device, epoch):
                     result[mode].update({key: float(np.mean([m[key] for m in sampler_metrics])) for key in sampler_metrics[0]})
         if relation_dataset is not None and len(relation_dataset):
             collected = collect_relations(model, relation_dataset, config, device)
-            valid, distance_valid = np.array(collected["reach_valid"], bool), np.array(collected["distance_valid"], bool)
+            valid = np.array(collected["reach_valid"], bool)
             probabilities = torch.sigmoid(torch.tensor(collected["logit"], dtype=torch.float64)).numpy()
             result["relation"] = binary_metrics(probabilities[valid], np.array(collected["target"])[valid])
-            errors = np.abs(np.array(collected["distance_m"])[distance_valid] - np.array(collected["target_distance_m"])[distance_valid])
-            result["relation"].update(distance_valid_count=int(distance_valid.sum()), distance_MAE_m=float(errors.mean()) if len(errors) else None)
+            result["relation"].update(distance_metrics(collected, config.get("r3", {}).get("lambda_distance", 1.) > 0))
     return result
 
 

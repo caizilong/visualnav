@@ -1,155 +1,145 @@
-import numpy as np
-import yaml
-import time
+"""ROS 2 waypoint controller with explicit legacy/metric command modes."""
+
+import argparse
+import math
 import threading
-from typing import Tuple
+import time
 
-# ROS
-import rospy
+import numpy as np
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32, Float32MultiArray, Bool
+from std_msgs.msg import Bool, Float32MultiArray
 
-from topic_names import (WAYPOINT_TOPIC, 
-			 			REACHED_GOAL_TOPIC)
+from deployment_config import robot_config
+from ros2_runtime import ROS2Runtime, application_args
 from ros_data import ROSData
-from utils import clip_angle
+from topic_names import METRIC_WAYPOINT_TOPIC, REACHED_GOAL_TOPIC, STOP_TOPIC, WAYPOINT_TOPIC
 
-# CONSTS
-CONFIG_PATH = "../config/robot.yaml"
-with open(CONFIG_PATH, "r") as f:
-	robot_config = yaml.safe_load(f)
-MAX_V = robot_config["max_v"]
-MAX_W = robot_config["max_w"]
-VEL_TOPIC = robot_config["vel_navi_topic"]
-DT = 1/robot_config["frame_rate"]
+ROBOT = robot_config()
+MAX_V, MAX_W = ROBOT["max_v"], ROBOT["max_w"]
+DT = 1 / ROBOT["frame_rate"]
 RATE = 9
+WAYPOINT_TIMEOUT = 1.0
 EPS = 1e-8
-WAYPOINT_TIMEOUT = 1 # seconds # TODO: tune this
-FLIP_ANG_VEL = np.pi/4
-
-# GLOBALS
-vel_msg = Twist()
-waypoint = ROSData(WAYPOINT_TIMEOUT, name="waypoint")
-reached_goal = False
-reverse_mode = False
-current_yaw = None
-r3_waypoint = ROSData(WAYPOINT_TIMEOUT, name="r3_waypoint", clock=time.monotonic)
-r3_active = False
-r3_stop = True
-r3_heartbeat = float("-inf")
-control_lock = threading.RLock()
-velocity_publisher = None
-r3_waypoint_time_s = None
-
-def clip_angle(theta) -> float:
-	"""Clip angle to [-pi, pi]"""
-	theta %= 2 * np.pi
-	if -np.pi < theta < np.pi:
-		return theta
-	return theta - 2 * np.pi
-      
-
-def pd_controller(waypoint: np.ndarray, time_step_s=None) -> Tuple[float]:
-	"""PD controller for the robot"""
-	assert len(waypoint) == 2 or len(waypoint) == 4, "waypoint must be a 2D or 4D vector"
-	dt = DT if time_step_s is None else time_step_s
-	if len(waypoint) == 2:
-		dx, dy = waypoint
-	else:
-		dx, dy, hx, hy = waypoint
-	# this controller only uses the predicted heading if dx and dy near zero
-	if len(waypoint) == 4 and np.abs(dx) < EPS and np.abs(dy) < EPS:
-		v = 0
-		w = clip_angle(np.arctan2(hy, hx))/dt
-	elif np.abs(dx) < EPS:
-		v =  0
-		w = np.sign(dy) * np.pi/(2*dt)
-	else:
-		v = dx / dt
-		w = np.arctan(dy/dx) / dt
-	v = np.clip(v, 0, MAX_V)
-	w = np.clip(w, -MAX_W, MAX_W)
-	return v, w
 
 
-def callback_drive(waypoint_msg: Float32MultiArray):
-	"""Callback function for the waypoint subscriber"""
-	global vel_msg
-	with control_lock:
-		if r3_active:
-			values = np.asarray(waypoint_msg.data)
-			if not r3_stop and len(values) in (2, 4) and np.isfinite(values).all():
-				r3_waypoint.set(values)
-		else:
-			waypoint.set(waypoint_msg.data)
-	
-	
-def callback_reached_goal(reached_goal_msg: Bool):
-	"""Callback function for the reached goal subscriber"""
-	global reached_goal
-	with control_lock:
-		reached_goal = reached_goal_msg.data
-		if reached_goal and velocity_publisher is not None:
-			velocity_publisher.publish(Twist())
+def clip_angle(theta):
+    return (theta + np.pi) % (2 * np.pi) - np.pi
 
 
-def callback_r3_stop(message: Bool):
-	global r3_active, r3_stop, r3_heartbeat
-	with control_lock:
-		r3_active = True
-		r3_heartbeat = time.monotonic()
-		if message.data or r3_stop:
-			r3_waypoint.last_time_received = float("-inf")
-		r3_stop = message.data
-		if r3_stop and velocity_publisher is not None:
-			# Callback threads remain responsive even if ROS simulation time pauses.
-			velocity_publisher.publish(Twist())
+def pd_controller(waypoint, time_step_s=None):
+    values = np.asarray(waypoint, dtype=float)
+    dt = DT if time_step_s is None else time_step_s
+    if values.shape not in ((2,), (4,)) or not np.isfinite(values).all():
+        raise ValueError("waypoint must be a finite XY or XY-heading vector")
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("prediction time must be finite and positive")
+    dx, dy = values[:2]
+    if len(values) == 4 and abs(dx) < EPS and abs(dy) < EPS:
+        v, w = 0., clip_angle(np.arctan2(values[3], values[2])) / dt
+    elif abs(dx) < EPS:
+        v, w = 0., np.sign(dy) * np.pi / (2 * dt)
+    else:
+        v, w = dx / dt, np.arctan(dy / dx) / dt
+    return float(np.clip(v, 0, MAX_V)), float(np.clip(w, -MAX_W, MAX_W))
 
 
-def callback_waypoint_time(message: Float32):
-	global r3_waypoint_time_s
-	with control_lock:
-		r3_waypoint_time_s = message.data if np.isfinite(message.data) and message.data > 0 else None
+class ControlState:
+    """Timeouts and stop signals use monotonic time, independently of ROS time."""
+
+    def __init__(self, mode, clock=time.monotonic):
+        if mode not in ("legacy", "metric"):
+            raise ValueError("control mode must be legacy or metric")
+        self.mode, self.clock = mode, clock
+        self.lock = threading.RLock()
+        self.waypoint = ROSData(WAYPOINT_TIMEOUT, clock=clock)
+        self.duration = None
+        self.reached = False
+        self.stopped = True
+        self.heartbeat = float("-inf")
+
+    def receive_waypoint(self, values):
+        with self.lock:
+            values = np.asarray(values, dtype=float)
+            if self.mode == "metric":
+                if values.shape != (3,) or not np.isfinite(values).all() or values[0] <= 0:
+                    self.waypoint.clear()
+                    return
+                if self.stopped or self.clock() - self.heartbeat >= WAYPOINT_TIMEOUT:
+                    self.waypoint.clear()
+                    return
+                self.duration, values = float(values[0]), values[1:]
+            elif values.shape not in ((2,), (4,)) or not np.isfinite(values).all():
+                self.waypoint.clear()
+                return
+            if not self.reached:
+                self.waypoint.set(values.copy())
+
+    def receive_stop(self, stopped):
+        with self.lock:
+            expired = self.clock() - self.heartbeat >= WAYPOINT_TIMEOUT
+            self.heartbeat = self.clock()
+            if stopped or self.stopped or expired:
+                self.waypoint.clear()
+            self.stopped = bool(stopped)
+
+    def receive_goal(self, reached):
+        with self.lock:
+            if reached or self.reached != bool(reached):
+                self.waypoint.clear()
+            self.reached = bool(reached)
+
+    def command(self):
+        with self.lock:
+            valid = not self.reached and self.waypoint.is_valid()
+            if self.mode == "metric":
+                valid = valid and not self.stopped and self.clock() - self.heartbeat < WAYPOINT_TIMEOUT
+            if not valid:
+                self.waypoint.clear()
+                return 0., 0.
+            return pd_controller(self.waypoint.get(), self.duration if self.mode == "metric" else None)
 
 
-def main():
-	global vel_msg, reverse_mode, velocity_publisher
-	rospy.init_node("PD_CONTROLLER", anonymous=False)
-	waypoint_sub = rospy.Subscriber(WAYPOINT_TOPIC, Float32MultiArray, callback_drive, queue_size=1)
-	reached_goal_sub = rospy.Subscriber(REACHED_GOAL_TOPIC, Bool, callback_reached_goal, queue_size=1)
-	rospy.Subscriber("/topoplan/r3_stop", Bool, callback_r3_stop, queue_size=1)
-	rospy.Subscriber("/topoplan/waypoint_time_s", Float32, callback_waypoint_time, queue_size=1)
-	vel_out = rospy.Publisher(VEL_TOPIC, Twist, queue_size=1)
-	velocity_publisher = vel_out
-	rate = rospy.Rate(RATE)
-	print("Registered with master node. Waiting for waypoints...")
-	while not rospy.is_shutdown():
-		if r3_active:
-			with control_lock:
-				command = Twist()
-				if (not reached_goal and not r3_stop and time.monotonic() - r3_heartbeat < WAYPOINT_TIMEOUT
-						and r3_waypoint.is_valid() and r3_waypoint_time_s is not None):
-					v, w = pd_controller(r3_waypoint.get(), r3_waypoint_time_s)
-					command.linear.x = -v if reverse_mode else v
-					command.angular.z = w
-				vel_out.publish(command)
-			time.sleep(1 / RATE)
-			continue
-		vel_msg = Twist()
-		if reached_goal:
-			vel_out.publish(vel_msg)
-			print("Reached goal! Stopping...")
-			return
-		elif waypoint.is_valid(verbose=True):
-			v, w = pd_controller(waypoint.get())
-			if reverse_mode:
-				v *= -1
-			vel_msg.linear.x = v
-			vel_msg.angular.z = w
-			print(f"publishing new vel: {v}, {w}")
-		vel_out.publish(vel_msg)
-		rate.sleep()
-	
+def main(args=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--control-mode", choices=("legacy", "metric"), default="legacy",
+                        help="Must match the policy; restart to change command modes")
+    parsed = parser.parse_args(application_args() if args is None else args)
+    state = ControlState(parsed.control_mode)
+    with ROS2Runtime("pd_controller") as ros:
+        publisher = ros.publisher(Twist, ROBOT["vel_navi_topic"])
 
-if __name__ == '__main__':
-	main()
+        def stop(message):
+            with state.lock:
+                state.receive_stop(message.data)
+                if message.data:
+                    publisher.publish(Twist())
+
+        def goal(message):
+            with state.lock:
+                state.receive_goal(message.data)
+                if message.data:
+                    publisher.publish(Twist())
+
+        topic = METRIC_WAYPOINT_TOPIC if state.mode == "metric" else WAYPOINT_TOPIC
+        ros.subscribe(Float32MultiArray, topic, lambda msg: state.receive_waypoint(msg.data))
+        ros.subscribe(Bool, REACHED_GOAL_TOPIC, goal, state=True)
+        if state.mode == "metric":
+            ros.subscribe(Bool, STOP_TOPIC, stop)  # Never replay an old enable heartbeat.
+        print(f"ROS 2 controller: mode={state.mode}, input={topic}", flush=True)
+        try:
+            while ros.ok():
+                with state.lock:
+                    v, w = state.command()
+                    message = Twist()
+                    message.linear.x, message.angular.z = v, w
+                    publisher.publish(message)
+                ros.sleep(1 / RATE)
+        finally:
+            publisher.publish(Twist())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

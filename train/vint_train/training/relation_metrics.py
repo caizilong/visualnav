@@ -3,6 +3,17 @@
 import numpy as np
 
 
+def distance_metrics(predictions, trained=True):
+    valid = np.asarray(predictions["distance_valid"], dtype=bool)
+    result = {"distance_head_trained": bool(trained), "distance_valid_count": int(valid.sum()),
+              "distance_MAE_m": None}
+    if trained and valid.any():
+        errors = np.abs(np.asarray(predictions["distance_m"])[valid]
+                        - np.asarray(predictions["target_distance_m"])[valid])
+        result["distance_MAE_m"] = float(errors.mean())
+    return result
+
+
 def binary_metrics(probability, target, threshold=0.5):
     p, y = np.asarray(probability, dtype=float), np.asarray(target)
     if p.shape != y.shape or p.ndim != 1 or not np.isfinite(p).all():

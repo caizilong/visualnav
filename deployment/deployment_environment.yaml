@@ -1,18 +1,18 @@
-name: vint_deployment
+# ROS 2 Humble's apt-installed rclpy extension requires Python 3.10.
+# Source /opt/ros/humble/setup.bash after activating this environment.
+name: visualnav_ros2
 channels:
-- pytorch
-- conda-forge
+  - conda-forge
 dependencies:
-- python=3.8.5
-- cudatoolkit=11.
-- torchvision
-- numpy
-- matplotlib
-- pyyaml
-- rospkg
-- pip:
-  - torch
-  - torchvision
-  - efficientnet_pytorch
-  - warmup_scheduler
-  - diffusers==0.11.1
+  - python=3.10
+  - pip
+  - pip:
+      - numpy<2
+      - torch==2.5.1
+      - torchvision==0.20.1
+      - diffusers==0.11.1
+      - huggingface-hub==0.25.2
+      - efficientnet-pytorch==0.7.1
+      - einops==0.8.0
+      - pyyaml
+      - pillow

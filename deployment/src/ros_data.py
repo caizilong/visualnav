@@ -1,4 +1,4 @@
-import rospy
+import time
 
 class ROSData:
     def __init__(self, timeout: int = 3, queue_size: int = 1, name: str = "", clock=None):
@@ -8,10 +8,14 @@ class ROSData:
         self.data = None
         self.name = name
         self.phantom = False
-        self.clock = rospy.get_time if clock is None else clock
+        self.clock = time.monotonic if clock is None else clock
     
     def get(self):
         return self.data
+
+    def clear(self):
+        self.data = None
+        self.last_time_received = float("-inf")
     
     def set(self, data): 
         time_waited = self.clock() - self.last_time_received
@@ -29,7 +33,7 @@ class ROSData:
         time_waited = self.clock() - self.last_time_received
         valid =  time_waited < self.timout
         if self.queue_size > 1:
-            valid = valid and len(self.data) == self.queue_size
+            valid = valid and self.data is not None and len(self.data) == self.queue_size
         if verbose and not valid:
             print(f"Not receiving {self.name} data for {time_waited} seconds (timeout: {self.timout} seconds)")
         return valid

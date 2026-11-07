@@ -1,307 +1,127 @@
-import matplotlib.pyplot as plt
-import os
-from typing import Tuple, Sequence, Dict, Union, Optional, Callable
+"""ROS 2 visual navigation for legacy and metric simulation checkpoints."""
+
+import argparse
+from pathlib import Path
+
 import numpy as np
 import torch
-import torch.nn as nn
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-
-import matplotlib.pyplot as plt
 import yaml
-
-# ROS
-import rospy
+from PIL import Image as PILImage
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model
 
-from vint_train.training.train_utils import get_action
-import torch
-from PIL import Image as PILImage
-import numpy as np
-import argparse
-import yaml
-import time
+from deployment_config import DEPLOYMENT_ROOT, model_paths, nonnegative_float, robot_config
+from observation_buffer import ObservationBuffer
+from ros2_runtime import ROS2Runtime, application_args
+from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC, REACHED_GOAL_TOPIC
+from utils import to_numpy, transform_images, load_model
+from vint_train.inference.rgb_policy import sample_conditioned_actions
 
-# UTILS
-from topic_names import (IMAGE_TOPIC,
-                        WAYPOINT_TOPIC,
-                        SAMPLED_ACTIONS_TOPIC)
-
-
-# CONSTANTS
-TOPOMAP_IMAGES_DIR = "../topomaps/images"
-MODEL_WEIGHTS_PATH = "../model_weights"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
-MODEL_CONFIG_PATH = "../config/models.yaml"
-with open(ROBOT_CONFIG_PATH, "r") as f:
-    robot_config = yaml.safe_load(f)
-MAX_V = robot_config["max_v"]
-MAX_W = robot_config["max_w"]
-RATE = robot_config["frame_rate"] 
-
-# GLOBALS
-context_queue = []
-context_size = None  
-subgoal = []
-
-# Load the model 
+TOPOMAP_IMAGES_DIR = DEPLOYMENT_ROOT / "topomaps" / "images"
+ROBOT = robot_config()
+MAX_V, RATE = ROBOT["max_v"], ROBOT["frame_rate"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
 
 
-def callback_obs(msg):
-    obs_img = msg_to_pil(msg)
-    if context_size is not None:
-        if len(context_queue) < context_size + 1:
-            context_queue.append(obs_img)
-        else:
-            context_queue.pop(0)
-            context_queue.append(obs_img)
-
-
-def main(args: argparse.Namespace):
-    global context_size
-
-     # load model parameters
-    with open(MODEL_CONFIG_PATH, "r") as f:
-        model_paths = yaml.safe_load(f)
-
-    model_config_path = model_paths[args.model]["config_path"]
-    with open(model_config_path, "r") as f:
-        model_params = yaml.safe_load(f)
-
-    context_size = model_params["context_size"]
-
-    # load model weights
-    ckpth_path = model_paths[args.model]["ckpt_path"]
-    if os.path.exists(ckpth_path):
-        print(f"Loading model from {ckpth_path}")
-    else:
-        raise FileNotFoundError(f"Model weights not found at {ckpth_path}")
-    model = load_model(
-        ckpth_path,
-        model_params,
-        device,
-        use_ema=model_paths[args.model].get("use_ema", True),
-    )
-    model = model.to(device)
-    model.eval()
-
-    if "action_scale_m" in getattr(model, "_model_config", {}):
+def main(args):
+    paths = model_paths(args.model)
+    config = yaml.safe_load(paths["config_path"].read_text())
+    if not 0 <= args.waypoint < config["len_traj_pred"] or args.num_samples < 1 or args.radius < 0:
+        raise ValueError("Invalid waypoint index, sample count or radius")
+    model = load_model(paths["ckpt_path"], config, device, use_ema=paths.get("use_ema", True))
+    if "action_scale_m" in model._model_config:
         from r3_navigate import run_navigation
-        return run_navigation(args, model, model_params, TOPOMAP_IMAGES_DIR, device)
+        return run_navigation(args, model, config, TOPOMAP_IMAGES_DIR, device)
+    with ROS2Runtime("navigation") as ros:
+        return run_legacy(args, model, config, ros)
 
-    
-     # load topomap
-    topomap_filenames = sorted(os.listdir(os.path.join(
-        TOPOMAP_IMAGES_DIR, args.dir)), key=lambda x: int(x.split(".")[0]))
-    topomap_dir = f"{TOPOMAP_IMAGES_DIR}/{args.dir}"
-    num_nodes = len(os.listdir(topomap_dir))
-    topomap = []
-    for i in range(num_nodes):
-        image_path = os.path.join(topomap_dir, topomap_filenames[i])
-        topomap.append(PILImage.open(image_path))
 
-    closest_node = 0
-    assert -1 <= args.goal_node < len(topomap), "Invalid goal index"
-    if args.goal_node == -1:
-        goal_node = len(topomap) - 1
-    else:
-        goal_node = args.goal_node
-    reached_goal = False
-
-     # ROS
-    rospy.init_node("EXPLORATION", anonymous=False)
-    rate = rospy.Rate(RATE)
-    image_curr_msg = rospy.Subscriber(
-        IMAGE_TOPIC, Image, callback_obs, queue_size=1)
-    waypoint_pub = rospy.Publisher(
-        WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)  
-    sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
-    goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
-
-    print("Registered with master node. Waiting for image observations...")
-
-    if model_params["model_type"] == "nomad":
-        num_diffusion_iters = model_params["num_diffusion_iters"]
-        noise_scheduler = DDPMScheduler(
-            num_train_timesteps=model_params["num_diffusion_iters"],
-            beta_schedule='squaredcos_cap_v2',
-            clip_sample=True,
-            prediction_type='epsilon'
-        )
-    # navigation loop
-    while not rospy.is_shutdown():
-        # EXPLORATION MODE
-        chosen_waypoint = np.zeros(4)
-        if len(context_queue) > model_params["context_size"]:
-            if model_params["model_type"] == "nomad":
-                obs_images = transform_images(context_queue, model_params["image_size"], center_crop=True)
-                obs_images = torch.split(obs_images, 3, dim=1)
-                obs_images = torch.cat(obs_images, dim=1) 
-                obs_images = obs_images.to(device)
-                mask = torch.zeros(1).long().to(device)  
-
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
-                goal_image = [transform_images(g_img, model_params["image_size"], center_crop=True).to(device) for g_img in topomap[start:end + 1]]
-                goal_image = torch.concat(goal_image, dim=0)
-
-                obsgoal_cond = model('vision_encoder', obs_img=obs_images.repeat(len(goal_image), 1, 1, 1), goal_img=goal_image, input_goal_mask=mask.repeat(len(goal_image)))
-                dists = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-                dists = to_numpy(dists.flatten())
-                min_idx = np.argmin(dists)
-                closest_node = min_idx + start
-                print("closest node:", closest_node)
-                sg_idx = min(min_idx + int(dists[min_idx] < args.close_threshold), len(obsgoal_cond) - 1)
-                obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
-
-                # infer action
-                with torch.no_grad():
-                    # encoder vision features
-                    if len(obs_cond.shape) == 2:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1)
-                    else:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
-                    
-                    # initialize action from Gaussian noise
-                    noisy_action = torch.randn(
-                        (args.num_samples, model_params["len_traj_pred"], 2), device=device)
-                    naction = noisy_action
-
-                    # init scheduler
-                    noise_scheduler.set_timesteps(num_diffusion_iters)
-
-                    start_time = time.time()
-                    for k in noise_scheduler.timesteps[:]:
-                        # predict noise
-                        noise_pred = model(
-                            'noise_pred_net',
-                            sample=naction,
-                            timestep=k,
-                            global_cond=obs_cond
-                        )
-                        # inverse diffusion step (remove noise)
-                        naction = noise_scheduler.step(
-                            model_output=noise_pred,
-                            timestep=k,
-                            sample=naction
-                        ).prev_sample
-                    print("time elapsed:", time.time() - start_time)
-
-                naction = to_numpy(get_action(naction))
-                sampled_actions_msg = Float32MultiArray()
-                sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
-                print("published sampled actions")
-                sampled_actions_pub.publish(sampled_actions_msg)
-                naction = naction[0] 
-                chosen_waypoint = naction[args.waypoint]
+@torch.no_grad()
+def run_legacy(args, model, config, ros):
+    directory = Path(TOPOMAP_IMAGES_DIR) / args.dir
+    paths = sorted((p for p in directory.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png")),
+                   key=lambda p: int(p.stem))
+    if not paths or [int(p.stem) for p in paths] != list(range(len(paths))):
+        raise ValueError("Topomap images must have contiguous indices starting at zero")
+    topomap = [PILImage.open(path).convert("RGB") for path in paths]
+    goal_node = len(topomap) - 1 if args.goal_node == -1 else args.goal_node
+    if not 0 <= goal_node < len(topomap):
+        raise ValueError("Invalid goal index")
+    observations = ObservationBuffer(config["context_size"])
+    ros.subscribe(Image, IMAGE_TOPIC, observations.callback, image=True)
+    waypoint_pub = ros.publisher(Float32MultiArray, WAYPOINT_TOPIC)
+    samples_pub = ros.publisher(Float32MultiArray, SAMPLED_ACTIONS_TOPIC)
+    goal_pub = ros.publisher(Bool, REACHED_GOAL_TOPIC, state=True)
+    goal_pub.publish(Bool(data=False))
+    closest_node, last_processed, reached = 0, None, False
+    print("ROS 2 navigation started. Waiting for image observations...", flush=True)
+    try:
+        while ros.ok():
+            frame_id, frames = observations.snapshot()
+            if reached or frames is None or frame_id == last_processed:
+                if frames is None or reached:
+                    waypoint_pub.publish(Float32MultiArray(data=[0., 0.]))
+                ros.sleep(.02)
+                continue
+            last_processed = frame_id
+            start = max(closest_node - args.radius, 0)
+            end = min(closest_node + args.radius + 1, goal_node)
+            nomad = config["model_type"] == "nomad"
+            obs = transform_images(frames, config["image_size"], center_crop=nomad).to(device)
+            goals = torch.cat([transform_images(image, config["image_size"], center_crop=nomad)
+                               for image in topomap[start:end + 1]]).to(device)
+            if nomad:
+                condition = model("vision_encoder", obs_img=obs.repeat(len(goals), 1, 1, 1),
+                                  goal_img=goals, input_goal_mask=torch.zeros(len(goals), device=device, dtype=torch.long))
+                distances = to_numpy(model("dist_pred_net", obsgoal_cond=condition).flatten())
+                nearest = int(np.argmin(distances))
+                closest_node = start + nearest
+                selected = min(nearest + int(distances[nearest] < args.close_threshold), len(goals) - 1)
+                sampling = dict(model._model_config, action_scale_m=1.)
+                samples = sample_conditioned_actions(model, condition[selected:selected + 1], sampling, args.num_samples)[0]
+                samples = to_numpy(samples)
+                chosen = samples[0, args.waypoint].copy()
+                samples_pub.publish(Float32MultiArray(data=np.concatenate(([0.], samples.ravel())).tolist()))
             else:
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
-                distances = []
-                waypoints = []
-                batch_obs_imgs = []
-                batch_goal_data = []
-                for i, sg_img in enumerate(topomap[start: end + 1]):
-                    transf_obs_img = transform_images(context_queue, model_params["image_size"])
-                    goal_data = transform_images(sg_img, model_params["image_size"])
-                    batch_obs_imgs.append(transf_obs_img)
-                    batch_goal_data.append(goal_data)
-                    
-                # predict distances and waypoints
-                batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(device)
-                batch_goal_data = torch.cat(batch_goal_data, dim=0).to(device)
-
-                distances, waypoints = model(batch_obs_imgs, batch_goal_data)
-                distances = to_numpy(distances)
-                waypoints = to_numpy(waypoints)
-                # look for closest node
-                min_dist_idx = np.argmin(distances)
-                # chose subgoal and output waypoints
-                if distances[min_dist_idx] > args.close_threshold:
-                    chosen_waypoint = waypoints[min_dist_idx][args.waypoint]
-                    closest_node = start + min_dist_idx
-                else:
-                    chosen_waypoint = waypoints[min(
-                        min_dist_idx + 1, len(waypoints) - 1)][args.waypoint]
-                    closest_node = min(start + min_dist_idx + 1, goal_node)
-        # RECOVERY MODE
-        if model_params["normalize"]:
-            chosen_waypoint[:2] *= (MAX_V / RATE)  
-        waypoint_msg = Float32MultiArray()
-        waypoint_msg.data = chosen_waypoint
-        waypoint_pub.publish(waypoint_msg)
-        reached_goal = closest_node == goal_node
-        goal_pub.publish(reached_goal)
-        if reached_goal:
-            print("Reached goal! Stopping...")
-        rate.sleep()
+                distances, waypoints = model(obs.repeat(len(goals), 1, 1, 1), goals)
+                distances, waypoints = to_numpy(distances).flatten(), to_numpy(waypoints)
+                nearest = int(np.argmin(distances))
+                selected = min(nearest + int(distances[nearest] < args.close_threshold), len(waypoints) - 1)
+                chosen = waypoints[selected, args.waypoint].copy()
+                closest_node = start + selected
+            if not np.isfinite(chosen).all() or not np.isfinite(distances).all():
+                raise FloatingPointError("Non-finite navigation prediction")
+            reached = start + nearest == goal_node and distances[nearest] < args.close_threshold
+            goal_pub.publish(Bool(data=bool(reached)))
+            if config.get("normalize", True):
+                chosen[:2] *= MAX_V / RATE
+            if reached or not observations.fresh():
+                chosen = np.zeros(2)
+            waypoint_pub.publish(Float32MultiArray(data=chosen.tolist()))
+            ros.sleep(1 / RATE)
+    finally:
+        waypoint_pub.publish(Float32MultiArray(data=[0., 0.]))
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Code to run GNM DIFFUSION EXPLORATION on the locobot")
-    parser.add_argument(
-        "--model",
-        "-m",
-        default="nomad",
-        type=str,
-        help="model name (only nomad is supported) (hint: check ../config/models.yaml) (default: nomad)",
-    )
-    parser.add_argument(
-        "--waypoint",
-        "-w",
-        default=2, # close waypoints exihibit straight line motion (the middle waypoint is a good default)
-        type=int,
-        help=f"""index of the waypoint used for navigation (between 0 and 4 or 
-        how many waypoints your model predicts) (default: 2)""",
-    )
-    parser.add_argument(
-        "--dir",
-        "-d",
-        default="topomap",
-        type=str,
-        help="path to topomap images",
-    )
-    parser.add_argument(
-        "--goal-node",
-        "-g",
-        default=-1,
-        type=int,
-        help="""goal node index in the topomap (if -1, then the goal node is 
-        the last node in the topomap) (default: -1)""",
-    )
-    parser.add_argument(
-        "--close-threshold",
-        "-t",
-        default=3,
-        type=int,
-        help="""temporal distance within the next node in the topomap before 
-        localizing to it (default: 3)""",
-    )
-    parser.add_argument(
-        "--radius",
-        "-r",
-        default=4,
-        type=int,
-        help="""temporal number of locobal nodes to look at in the topopmap for
-        localization (default: 2)""",
-    )
-    parser.add_argument(
-        "--num-samples",
-        "-n",
-        default=8,
-        type=int,
-        help=f"Number of actions sampled from the exploration model (default: 8)",
-    )
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", "-m", default="nomad", help="Name in deployment/config/models.yaml")
+    parser.add_argument("--waypoint", "-w", type=int, default=2, help="Zero-based predicted waypoint index")
+    parser.add_argument("--dir", "-d", default="topomap", help="Topomap name or absolute image directory")
+    parser.add_argument("--goal-node", "-g", type=int, default=-1, help="Final topomap node; -1 means the last node")
+    parser.add_argument("--close-threshold", "-t", type=nonnegative_float, default=3.0,
+                        help="Temporal distance threshold; must match R3 calibration settings")
+    parser.add_argument("--radius", "-r", type=int, default=4)
+    parser.add_argument("--num-samples", "-n", type=int, default=8)
     parser.add_argument("--calibration", help="R3 calibration JSON matching these weights")
     parser.add_argument("--allow-uncalibrated", action="store_true", help="Explicit R3 debugging mode")
     parser.add_argument("--route-config", help="Optional required_nodes / broken_after JSON")
-    parser.add_argument("--decision-log", default="../logs/r3_decisions.jsonl")
-    args = parser.parse_args()
-    print(f"Using {device}")
-    main(args)
+    parser.add_argument("--decision-log", default=str(DEPLOYMENT_ROOT / "logs" / "r3_decisions.jsonl"))
+    return parser
 
 
+if __name__ == "__main__":
+    try:
+        main(build_parser().parse_args(application_args()))
+    except KeyboardInterrupt:
+        pass
