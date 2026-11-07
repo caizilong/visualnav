@@ -19,3 +19,10 @@ nomad:
 
 
 # add your own model configs here after saving the *.pth file to ../model_weight
+
+# Habitat scratch: copy the run's resolved_config.yaml and complete checkpoint.
+# Then use navigate.py --model nomad_r3 --calibration <matching calibration.json>.
+nomad_r3:
+  config_path: "../model_weights/r3/resolved_config.yaml"
+  ckpt_path: "../model_weights/r3/checkpoint_latest.pth"
+  use_ema: true

@@ -17,6 +17,7 @@ from std_msgs.msg import Bool, Float32MultiArray
 from utils import msg_to_pil, to_numpy, transform_images, load_model
 
 from vint_train.training.train_utils import get_action
+from vint_train.models.action_codec import decode_actions
 import torch
 from PIL import Image as PILImage
 import numpy as np
@@ -44,12 +45,18 @@ RATE = robot_config["frame_rate"]
 # GLOBALS
 context_queue = []
 context_size = None  
+observation_stride = 1
+observation_count = 0
 
 # Load the model 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 def callback_obs(msg):
+    global observation_count
+    observation_count += 1
+    if (observation_count - 1) % observation_stride:
+        return
     obs_img = msg_to_pil(msg)
     if context_size is not None:
         if len(context_queue) < context_size + 1:
@@ -60,7 +67,7 @@ def callback_obs(msg):
 
 
 def main(args: argparse.Namespace):
-    global context_size
+    global context_size, observation_stride
 
     # load model parameters
     with open(MODEL_CONFIG_PATH, "r") as f:
@@ -86,6 +93,8 @@ def main(args: argparse.Namespace):
     )
     model = model.to(device)
     model.eval()
+    canonical = model._model_config
+    observation_stride = canonical.get("observation_stride", 1)
 
     num_diffusion_iters = model_params["num_diffusion_iters"]
     noise_scheduler = DDPMScheduler(
@@ -155,7 +164,10 @@ def main(args: argparse.Namespace):
                     ).prev_sample
                 print("time elapsed:", time.time() - start_time)
 
-            naction = to_numpy(get_action(naction))
+            if "action_scale_m" in canonical:
+                naction = to_numpy(decode_actions(naction, canonical["action_stats"], canonical["action_scale_m"]))
+            else:
+                naction = to_numpy(get_action(naction))
             
             sampled_actions_msg = Float32MultiArray()
             sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
@@ -165,7 +177,7 @@ def main(args: argparse.Namespace):
 
             chosen_waypoint = naction[args.waypoint]
 
-            if model_params["normalize"]:
+            if model_params["normalize"] and "action_scale_m" not in canonical:
                 chosen_waypoint *= (MAX_V / RATE)
             waypoint_msg.data = chosen_waypoint
             waypoint_pub.publish(waypoint_msg)

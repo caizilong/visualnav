@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from pathlib import Path
+import math
 
 import yaml
 
@@ -43,6 +44,29 @@ def resolve_model_config(config):
             raise ValueError(f"Vision encoder {encoder!r} is not implemented")
         with (Path(__file__).parent.parent / "data/data_config.yaml").open() as stream:
             resolved["action_stats"] = yaml.safe_load(stream)["action_stats"]
+        if "action_stats" in config:
+            from vint_train.models.action_codec import validate_action_stats
+            resolved["action_stats"] = validate_action_stats(config["action_stats"])
+        if "action_scale_m" in config:
+            for name in ("action_scale_m", "action_time_step_s"):
+                value = float(config[name])
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"{name} must be finite and positive")
+                resolved[name] = value
+            stride = config.get("observation_stride", 1)
+            if type(stride) is not int or stride < 1:
+                raise ValueError("observation_stride must be a positive integer")
+            resolved["observation_stride"] = stride
+        r3 = config.get("r3", {})
+        if r3.get("enabled", False):
+            if encoder != "nomad_vint":
+                raise ValueError("R3 v1 supports nomad_vint")
+            labels = deepcopy(r3["label_definition"])
+            horizon = float(labels["max_path_length_m"])
+            if not math.isfinite(horizon) or horizon <= 0:
+                raise ValueError("R3 requires an explicit positive path-length bound")
+            resolved["r3"] = {"enabled": True, "label_definition": labels,
+                              "hidden_dims": list(r3.get("hidden_dims", [128, 64]))}
     else:
         raise ValueError(f"Unsupported model_type: {model_type!r}")
     resolved.update({key: deepcopy(config[key]) for key in keys})
@@ -90,5 +114,13 @@ def build_model(config):
                 cond_predict_scale=c["cond_predict_scale"]),
             dist_pred_net=DenseNetwork(embedding_dim=c["encoding_size"]),
         )
+        # Construct common modules first: same seed gives the same NoMaD weights
+        # for the scratch baseline and R3. Never download pretrained encoders.
+        if c.get("r3", {}).get("enabled"):
+            from vint_train.models.nomad.goal_relation_head import GoalRelationHead
+            model.goal_relation_head = GoalRelationHead(
+                c["encoding_size"], c["r3"]["label_definition"]["max_path_length_m"],
+                c["r3"]["hidden_dims"],
+            )
     model._model_config = c
     return model

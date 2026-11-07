@@ -1,4 +1,9 @@
 ### 训练
+
+Habitat 从零训练的 NoMaD / R-only / R+D 使用独立入口配置，见
+[R3 数据、训练、校准和 Ubuntu 验收说明](../docs/R3_HABITAT.md)。
+入口配置是 `config/nomad_r3_habitat.yaml`，不要用下面的旧训练脚本启动 R3。
+
 ```
 cd train
 ./run_train.sh

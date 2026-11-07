@@ -88,6 +88,10 @@ def main(args: argparse.Namespace):
     model = model.to(device)
     model.eval()
 
+    if "action_scale_m" in getattr(model, "_model_config", {}):
+        from r3_navigate import run_navigation
+        return run_navigation(args, model, model_params, TOPOMAP_IMAGES_DIR, device)
+
     
      # load topomap
     topomap_filenames = sorted(os.listdir(os.path.join(
@@ -292,6 +296,10 @@ if __name__ == "__main__":
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
+    parser.add_argument("--calibration", help="R3 calibration JSON matching these weights")
+    parser.add_argument("--allow-uncalibrated", action="store_true", help="Explicit R3 debugging mode")
+    parser.add_argument("--route-config", help="Optional required_nodes / broken_after JSON")
+    parser.add_argument("--decision-log", default="../logs/r3_decisions.jsonl")
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)

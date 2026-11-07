@@ -49,6 +49,8 @@ class ViNT_Dataset(Dataset):
         normalize: bool = True,
         obs_type: str = "image",
         goal_type: str = "image",
+        dataset_config: Optional[Dict] = None,
+        dataset_index: Optional[int] = None,
     ):
         """
         Main ViNT dataset class
@@ -118,14 +120,13 @@ class ViNT_Dataset(Dataset):
             os.path.join(os.path.dirname(__file__), "data_config.yaml"), "r"
         ) as f:
             all_data_config = yaml.safe_load(f)
-        assert (
-            self.dataset_name in all_data_config
-        ), f"Dataset {self.dataset_name} not found in data_config.yaml"
+        if dataset_config is None and self.dataset_name not in all_data_config:
+            raise ValueError(f"Dataset {self.dataset_name} not found in data_config.yaml")
         dataset_names = list(all_data_config.keys())
         dataset_names.sort()
         # use this index to retrieve the dataset name from the data_config.yaml
-        self.dataset_index = dataset_names.index(self.dataset_name)
-        self.data_config = all_data_config[self.dataset_name]
+        self.dataset_index = (dataset_names.index(self.dataset_name) if dataset_index is None else dataset_index)
+        self.data_config = all_data_config[self.dataset_name] if dataset_config is None else dict(dataset_config)
         self.trajectory_cache = {}
         cache_identity = os.path.abspath(data_folder) + "\n" + "\n".join(self.traj_names)
         self._cache_id = hashlib.sha256(cache_identity.encode()).hexdigest()[:12]

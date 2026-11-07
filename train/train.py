@@ -30,6 +30,9 @@ from vint_train.training.train_eval_loop import (
 
 
 def main(config):
+    if config.get("training_profile") == "habitat_scratch":
+        from vint_train.training.simulation_train import run_habitat_scratch
+        return run_habitat_scratch(config)
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
 
@@ -300,6 +303,9 @@ if __name__ == "__main__":
         type=str,
         help="Path to the config file in train_config folder",
     )
+    parser.add_argument("--ablation", choices=("baseline", "r_only", "r_d"),
+                        help="Habitat scratch controls with shared model/data defaults")
+    parser.add_argument("--resume", help="Resume a matching full v2 scratch checkpoint at its next epoch")
     args = parser.parse_args()
 
     with open("config/defaults.yaml", "r") as f:
@@ -311,6 +317,18 @@ if __name__ == "__main__":
         user_config = yaml.safe_load(f)
 
     config.update(user_config)
+
+    if args.ablation or args.resume:
+        if config.get("training_profile") != "habitat_scratch":
+            parser.error("--ablation and --resume require training_profile: habitat_scratch")
+    if args.ablation:
+        relation = config.setdefault("r3", {})
+        relation["enabled"] = args.ablation != "baseline"
+        relation["lambda_distance"] = 1. if args.ablation == "r_d" else 0.
+        relation.setdefault("selector", {})["use_distance"] = args.ablation == "r_d"
+        config["run_name"] += "_" + args.ablation
+    if args.resume:
+        config["resume_from"] = args.resume
 
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_folder"] = os.path.join(

@@ -53,7 +53,7 @@ def checkpoint_state(checkpoint, model_type, *, use_ema=True):
     if not isinstance(checkpoint, Mapping):
         raise ValueError("Checkpoint must be a state_dict or a checkpoint mapping")
     if "format_version" in checkpoint:
-        if checkpoint["format_version"] != 1 or model_type != "nomad":
+        if checkpoint["format_version"] not in (1, 2) or model_type != "nomad":
             raise ValueError(f"Unsupported checkpoint format_version={checkpoint['format_version']!r} "
                              f"for model_type={model_type!r}")
         if use_ema:
@@ -104,9 +104,11 @@ def load_model_weights(model, checkpoint, model_type, *, use_ema=False):
     return origin
 
 
-def weights_sha256(model):
+def weights_sha256(model, exclude_prefixes=()):
     digest = hashlib.sha256()
     for key, tensor in sorted(unwrap_model(model).state_dict().items()):
+        if key.startswith(tuple(exclude_prefixes)):
+            continue
         tensor = tensor.detach().cpu().contiguous()
         digest.update(f"{key}:{tensor.dtype}:{tuple(tensor.shape)}\n".encode())
         digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
@@ -119,6 +121,8 @@ def load_model(model_path, config, device=torch.device("cpu"), *, use_ema=True):
     model = build_model(config)
     origin = load_model_weights(model, checkpoint, config["model_type"], use_ema=use_ema)
     fingerprint = weights_sha256(model)
+    model._weights_origin = origin
+    model._weights_sha256 = fingerprint
     epoch = checkpoint.get("epoch", "unknown")
     model.to(device)
     model.eval()

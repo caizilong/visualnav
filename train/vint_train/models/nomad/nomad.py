@@ -11,13 +11,16 @@ class NoMaD(nn.Module):
 
     def __init__(self, vision_encoder, 
                        noise_pred_net,
-                       dist_pred_net):
+                       dist_pred_net,
+                       goal_relation_head=None):
         super(NoMaD, self).__init__()
 
 
         self.vision_encoder = vision_encoder
         self.noise_pred_net = noise_pred_net
         self.dist_pred_net = dist_pred_net
+        if goal_relation_head is not None:
+            self.goal_relation_head = goal_relation_head
     
     def forward(self, func_name, **kwargs):
         if func_name == "vision_encoder":
@@ -26,6 +29,10 @@ class NoMaD(nn.Module):
             output = self.noise_pred_net(sample=kwargs["sample"], timestep=kwargs["timestep"], global_cond=kwargs["global_cond"])
         elif func_name == "dist_pred_net":
             output = self.dist_pred_net(kwargs["obsgoal_cond"])
+        elif func_name == "goal_relation_head":
+            if not hasattr(self, "goal_relation_head"):
+                raise ValueError("This checkpoint has no R3 goal relation head")
+            output = self.goal_relation_head(kwargs["obsgoal_cond"])
         else:
             raise NotImplementedError
         return output
