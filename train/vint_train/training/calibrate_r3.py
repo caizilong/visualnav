@@ -10,12 +10,12 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from vint_train.data.simulation import load_manifest, digest_json
+from vint_train.data.simulation import load_manifest
 from vint_train.data.goal_relation_dataset import GoalRelationDataset
 from vint_train.models.weights import load_model
 from vint_train.inference.goal_relation_selector import (choose_subgoal, localization_window,
                                                         prepare_route_decision, legal_candidate_nodes)
-from vint_train.inference.calibration import load_calibration, selector_spec
+from vint_train.inference.calibration import load_calibration, selector_spec, calibration_binding
 from .simulation_train import collect_relations, finite_json
 from .relation_metrics import binary_metrics, choose_threshold, distance_metrics
 
@@ -157,6 +157,8 @@ def main():
         return rows, predictions
     if args.calibration:
         artifact = load_calibration(args.calibration, model, config)
+        if artifact.get("data_fingerprint") != bundle["fingerprint"]:
+            raise ValueError("Calibration data/split fingerprint differs from the evaluation manifest")
         rows, predictions = collect(args.split)
         output = {"status": "evaluated", "split": args.split,
                   "weights_sha256": model._weights_sha256,
@@ -170,11 +172,9 @@ def main():
             valid = np.asarray(predictions["reach_valid"], bool)
             p = torch.sigmoid(torch.tensor(predictions["logit"], dtype=torch.float64) / temperature).numpy()
             threshold, _ = choose_threshold(p[valid], np.asarray(predictions["target"])[valid], args.max_fdr, args.min_accepted)
-            output = {"schema_version": 1, "status": "calibrated", "temperature": temperature,
-                      "threshold": threshold, "weights_sha256": model._weights_sha256,
-                      "weight_source": model._weights_origin,
-                      "label_definition_sha256": digest_json(config["r3"]["label_definition"]),
-                      "label_definition": config["r3"]["label_definition"], "selector_spec": settings,
+            output = {"schema_version": 2, "status": "calibrated", "temperature": temperature,
+                      "threshold": threshold, **calibration_binding(model, config),
+                      "label_definition": config["r3"]["label_definition"],
                       "data_fingerprint": bundle["fingerprint"], "max_empirical_fdr": args.max_fdr,
                       "min_accepted": args.min_accepted,
                       "temperature_fit_count": int(np.asarray(temp["reach_valid"]).sum()),
@@ -182,7 +182,7 @@ def main():
                       "uncalibrated_report": report(rows, predictions, 1., .5, settings, distance_head_trained),
                       "guarantee": "none; empirical held-out metrics only"}
         except (ValueError, KeyError, TypeError) as exc:
-            output = {"schema_version": 1, "status": "failed", "reason": str(exc)}
+            output = {"schema_version": 2, "status": "failed", "reason": str(exc)}
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(finite_json(output), indent=2, allow_nan=False) + "\n")

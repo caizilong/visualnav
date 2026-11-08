@@ -1,5 +1,9 @@
 # R3：Habitat 从零联合训练
 
+R1 组合扩展见 [R1 修改计划与使用说明](R1_IMPLEMENTATION_PLAN.md)：R1 新增监督只使用既有 waypoint，本页 R3 标签协议保持不变。本页历史验收记录不涵盖本次尚未验证的 R1 修改。
+
+后续审查修复见 [R1 审查修复报告](R1_REVIEW_FIX_REPORT.md)。共享 Habitat trainer 现增加同种子 baseline 初始化校验和独立随机流；旧随机协议断点不能作为新协议的严格续训断点。新校准为 schema 2，绑定完整权重及模型配置；旧 schema 1 仅用于不含 R1 的旧 R3 模型。下方历史测试记录也不代表这些新改动已通过测试。
+
 已完成 R3 单测；此前合成数据的训练、恢复、AMP、校准和推理 smoke 已通过。部署入口现使用 ROS 2 Humble / Python 3.10，环境和启动方法见 [部署说明](../deployment/README.md)。这些检查不代表真实 Habitat 闭环或实机验收通过；模板的 batch、学习率、100 epochs 仍是初始配置，不代表已测得的论文效果。
 
 ## 1. 入口与范围

@@ -24,7 +24,13 @@ class NoMaD(nn.Module):
     
     def forward(self, func_name, **kwargs):
         if func_name == "vision_encoder":
-            output = self.vision_encoder(kwargs["obs_img"], kwargs["goal_img"], input_goal_mask=kwargs["input_goal_mask"])
+            extra = {"return_r1": True} if kwargs.get("return_r1", False) else {}
+            output = self.vision_encoder(kwargs["obs_img"], kwargs["goal_img"],
+                                         input_goal_mask=kwargs["input_goal_mask"], **extra)
+        elif func_name == "spatial_tokens":
+            if not hasattr(self.vision_encoder, "extract_spatial_tokens"):
+                raise ValueError("Spatial outputs require an R1 NoMaD_ViNT model")
+            output = self.vision_encoder.extract_spatial_tokens(kwargs["obs_img"])
         elif func_name == "noise_pred_net":
             output = self.noise_pred_net(sample=kwargs["sample"], timestep=kwargs["timestep"], global_cond=kwargs["global_cond"])
         elif func_name == "dist_pred_net":

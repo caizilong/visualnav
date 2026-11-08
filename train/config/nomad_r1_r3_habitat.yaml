@@ -1,0 +1,95 @@
+# R1 uses only existing RGB + XY waypoint targets; R3 keeps its existing labels.
+# This is an initial recipe, not a tested memory/time/performance guarantee.
+training_profile: habitat_scratch
+initialization: scratch  # Explicitly shared across every ablation; no pretrained warm start.
+project_name: nomad_habitat
+run_name: r1_r3_scratch
+use_wandb: false
+train: true
+seed: 0
+gpu_ids: [0]
+num_workers: 4
+epochs: 100
+optimizer: adamw
+scheduler: linear_warmup_cosine
+lr: 5.0e-5
+weight_decay: 0.01
+warmup_epochs: 4
+batch_size: 4
+relation_batch_size: 4
+eval_batch_size: 4
+gradient_accumulation_steps: 4
+amp: true
+activation_checkpointing: false
+max_norm: 1.0
+clipping: false
+print_log_freq: 50
+gradient_probe_every: 200
+checkpoint_every: 10
+eval_sampling_batches: 1
+eval_action_samples: 4
+eval_fraction: 1.0
+
+model_type: nomad
+vision_encoder: nomad_vint
+encoding_size: 256
+obs_encoder: efficientnet-b0
+cond_predict_scale: false
+mha_num_attention_heads: 4
+mha_num_attention_layers: 4
+mha_ff_dim_factor: 4
+down_dims: [64, 128, 256]
+num_diffusion_iters: 10
+image_size: [96, 96]
+context_type: temporal
+context_size: 3
+goal_type: image
+normalize: true
+learn_angle: false
+len_traj_pred: 8
+goal_mask_prob: 0.5
+alpha: 0.0001
+distance: {min_dist_cat: 0, max_dist_cat: 20}
+action: {min_dist_cat: 3, max_dist_cat: 20}
+datasets: {}
+
+simulation:
+  manifest: ../datasets/habitat/manifest.json
+  action_statistics: ../datasets/habitat/action_stats.json
+  r1_statistics: ../datasets/habitat/r1_statistics.json
+  # cache_dir: /data/habitat/nomad_cache
+
+r1:
+  enabled: true
+  mode: bottleneck  # auxiliary removes feedback, but keeps the same auxiliary task.
+  representation: query_tokens  # CLI also provides global_condition / pooled_spatial controls.
+  fusion: shared
+  num_sectors: 6
+  num_radial_bins: 4
+  token_dim: 64
+  num_attention_heads: 4
+  lambda_visitation: 0.1  # Initial weight; tune only using train/validation data.
+  stationary_epsilon_m: 0.0001  # Numerical dead zone for undefined bearings.
+  max_fit_points: 200000
+  fit_seed: 0  # Shared across training seeds, so spatial bins remain identical.
+  prior_smoothing_mass: 0.0001  # Fixed before validation; prevents log(0) for unseen bins.
+  # discretization and its statistics fingerprint are loaded from r1_statistics.
+
+r3:
+  enabled: true
+  hidden_dims: [128, 64]
+  lambda_reach: 1.0
+  lambda_distance: 1.0
+  lambda_start: 0.1
+  lambda_end: 1.0
+  warmup_steps: 500
+  distance_beta: 0.1
+  selector:
+    max_forward_skip: 2
+    use_distance: true
+    close_threshold: 3.0
+    radius: 4
+  runtime:
+    max_rejections: 3
+    rejection_timeout_s: 2.0
+    stale_timeout_s: 2.0

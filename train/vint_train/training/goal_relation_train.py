@@ -14,15 +14,19 @@ def relation_weight(successful_steps, start=0.1, end=1.0, warmup_steps=500):
     return end if warmup_steps == 0 else start + (end - start) * min(1, successful_steps / warmup_steps)
 
 
-def window_denominators(action_batches, goal_masks, relation_batches):
+def window_denominators(action_batches, goal_masks, relation_batches, config=None):
     b = sum(len(batch[0]) for batch in action_batches)
     action_count = sum(int((batch[6] > 0).sum()) for batch in action_batches)
     temporal_count = sum(int((mask == 0).sum()) for mask in goal_masks)
     r_count = sum(int(batch["reach_valid"].sum()) for batch in relation_batches)
     d_count = sum(int(batch["distance_valid"].sum()) for batch in relation_batches)
-    return {"action": action_count + .01 * b, "temporal": temporal_count + .01 * b,
+    result = {"action": action_count + .01 * b, "temporal": temporal_count + .01 * b,
             "reach": r_count, "distance": d_count, "action_count": action_count,
             "temporal_count": temporal_count, "action_samples": b}
+    if config is not None and config.get("r1", {}).get("enabled", False):
+        from .trajectory_visitation import visitation_targets
+        result["visitation"] = sum(int(visitation_targets(batch, config)[1].sum()) for batch in action_batches)
+    return result
 
 
 def model_call(model, name, activation_checkpointing=False, **inputs):
@@ -36,12 +40,17 @@ def model_call(model, name, activation_checkpointing=False, **inputs):
     return model(name, **inputs)
 
 
-def action_loss_sums(model, batch, goal_mask, scheduler, config, device, activation_checkpointing=False):
+def action_loss_sums(model, batch, goal_mask, scheduler, config, device, activation_checkpointing=False,
+                     visitation_metrics=None, diffusion_streams=None):
     obs, goal, actions, distance, _, _, action_mask = batch
     mask = goal_mask.to(device)
-    condition = model_call(model, "vision_encoder", activation_checkpointing,
+    r1 = config.get("r1", {})
+    predict_visitation = r1.get("enabled", False) and r1.get("visitation_head_trained", True)
+    extra = {"return_r1": True} if predict_visitation else {}
+    encoded = model_call(model, "vision_encoder", activation_checkpointing,
                            obs_img=normalize_rgb(obs.to(device)), goal_img=normalize_rgb(goal.to(device)),
-                           input_goal_mask=mask)
+                           input_goal_mask=mask, **extra)
+    condition = encoded["condition"] if predict_visitation else encoded
     visible, valid_action = mask == 0, action_mask.to(device) > 0
     zero = condition.new_zeros((), dtype=torch.float32)
     temporal = zero
@@ -51,14 +60,27 @@ def action_loss_sums(model, batch, goal_mask, scheduler, config, device, activat
     action = zero
     if valid_action.any():
         targets = normalize_actions(actions.to(device), config["action_stats"])
-        noise = torch.randn_like(targets)
-        steps = torch.randint(0, scheduler.config.num_train_timesteps, (len(targets),), device=device)
+        if diffusion_streams is None:
+            noise = torch.randn_like(targets)
+            steps = torch.randint(0, scheduler.config.num_train_timesteps, (len(targets),), device=device)
+        else:
+            noise, steps = diffusion_streams.draw(targets, scheduler.config.num_train_timesteps)
         noisy = scheduler.add_noise(targets, noise, steps)
         pred = model_call(model, "noise_pred_net", activation_checkpointing,
                           sample=noisy, timestep=steps, global_cond=condition)
         per_sample = (pred.float() - noise).square().mean(dim=(1, 2))
         action = per_sample[valid_action].sum()
-    return {"action": action, "temporal": temporal}
+    sums = {"action": action, "temporal": temporal}
+    if r1.get("enabled", False):
+        from .trajectory_visitation import visitation_targets, visitation_loss_sum
+        target, valid, counts = visitation_targets(batch, config, device)
+        logits = encoded["visitation_logits"] if predict_visitation else None
+        sums["visitation"] = visitation_loss_sum(logits, target, valid) if predict_visitation else zero
+        if visitation_metrics is not None:
+            visitation_metrics.update(logits, target, valid, counts)
+            if predict_visitation and not model.training:
+                visitation_metrics.update_token_permutation(model, encoded, target, valid, counts)
+    return sums
 
 
 def relation_loss_sums(model, batch, config, device, activation_checkpointing=False):

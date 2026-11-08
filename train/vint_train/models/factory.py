@@ -19,6 +19,9 @@ def resolve_model_config(config):
         goal_type=config.get("goal_type", "image"),
     )
     model_type = resolved["model_type"]
+    if config.get("r1", {}).get("enabled", False) and (
+            model_type != "nomad" or config.get("vision_encoder") != "nomad_vint"):
+        raise ValueError("R1 supports NoMaD with nomad_vint")
     if model_type == "gnm":
         keys = ("obs_encoding_size", "goal_encoding_size")
     elif model_type == "vint":
@@ -67,6 +70,9 @@ def resolve_model_config(config):
                 raise ValueError("R3 requires an explicit positive path-length bound")
             resolved["r3"] = {"enabled": True, "label_definition": labels,
                               "hidden_dims": list(r3.get("hidden_dims", [128, 64]))}
+        if config.get("r1", {}).get("enabled", False):
+            from vint_train.models.nomad.spatial_bottleneck import resolve_r1_config
+            resolved["r1"] = resolve_r1_config(config["r1"])
     else:
         raise ValueError(f"Unsupported model_type: {model_type!r}")
     resolved.update({key: deepcopy(config[key]) for key in keys})
@@ -116,6 +122,22 @@ def build_model(config):
         )
         # Construct common modules first: same seed gives the same NoMaD weights
         # for the scratch baseline and R3. Never download pretrained encoders.
+        if c.get("r1", {}).get("enabled"):
+            import torch
+            from vint_train.models.nomad.spatial_bottleneck import SpatialBottleneck, GlobalVisitationHead
+
+            # Isolate the additional CPU initialization from R3's RNG stream.
+            # Both R1 and R1+R3 start their spatial module at this same point.
+            with torch.random.fork_rng(devices=[]):
+                shared = {key: c["r1"][key] for key in ("num_sectors", "num_radial_bins", "token_dim")}
+                if c["r1"]["representation"] == "global_condition":
+                    encoder.spatial_bottleneck = GlobalVisitationHead(condition_dim=c["encoding_size"], **shared)
+                else:
+                    encoder.spatial_bottleneck = SpatialBottleneck(
+                        feature_dim=encoder.num_obs_features, condition_dim=c["encoding_size"],
+                        num_attention_heads=c["r1"]["num_attention_heads"],
+                        representation=c["r1"]["representation"], **shared)
+            encoder.r1_mode = c["r1"]["mode"]
         if c.get("r3", {}).get("enabled"):
             from vint_train.models.nomad.goal_relation_head import GoalRelationHead
             model.goal_relation_head = GoalRelationHead(

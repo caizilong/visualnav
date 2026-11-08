@@ -13,14 +13,27 @@ def selector_spec(config):
     return {key: supplied.get(key, default) for key, default in defaults.items()}
 
 
+def calibration_binding(model, config):
+    """Bind shape-invisible R1 semantics as well as every model tensor."""
+    return {"weights_sha256": model._weights_sha256,
+            "weight_source": model._weights_origin,
+            "model_config_sha256": digest_json(model._model_config),
+            "label_definition_sha256": digest_json(config["r3"]["label_definition"]),
+            "selector_spec": selector_spec(config)}
+
+
 def load_calibration(path, model, config):
     artifact = json.loads(Path(path).read_text())
-    if artifact.get("schema_version") != 1 or artifact.get("status") != "calibrated":
+    schema = artifact.get("schema_version")
+    if schema not in (1, 2) or artifact.get("status") != "calibrated":
         raise ValueError("Calibration is missing or failed")
-    expected = {"weights_sha256": model._weights_sha256,
-                "weight_source": model._weights_origin,
-                "label_definition_sha256": digest_json(config["r3"]["label_definition"]),
-                "selector_spec": selector_spec(config)}
+    expected = calibration_binding(model, config)
+    if schema == 1:
+        # Preserve old plain-R3 artifacts. Any R1 model must be recalibrated
+        # with a binding that distinguishes auxiliary vs bottleneck semantics.
+        if model._model_config.get("r1", {}).get("enabled"):
+            raise ValueError("R1+R3 requires a schema 2 calibration; recalibrate this checkpoint")
+        expected.pop("model_config_sha256")
     for key, value in expected.items():
         if artifact.get(key) != value:
             raise ValueError(f"Calibration mismatch: {key}")

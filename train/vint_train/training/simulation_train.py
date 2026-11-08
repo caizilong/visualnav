@@ -1,7 +1,6 @@
-"""Habitat-only, random-initialized NoMaD/R3 training with two data streams."""
+"""Habitat scratch NoMaD/R1/R3; R1 reuses targets in the action stream."""
 
 import copy
-import hashlib
 import itertools
 import json
 import math
@@ -20,7 +19,6 @@ from vint_train.data.simulation import load_manifest, load_action_statistics
 from vint_train.data.goal_relation_dataset import GoalRelationDataset
 from vint_train.data.vint_dataset import ViNT_Dataset
 from vint_train.models.factory import build_model
-from vint_train.models.weights import weights_sha256
 from vint_train.models.action_codec import normalize_rgb, validate_action_stats
 from vint_train.inference.rgb_policy import make_noise_scheduler, score_rgb_pairs, sample_conditioned_actions
 from .checkpoint import save_checkpoint
@@ -28,6 +26,9 @@ from .simulation_checkpoint import make_sim_checkpoint, restore_sim_checkpoint
 from .goal_relation_train import (action_loss_sums, relation_loss_sums, relation_weight,
                                   window_denominators, weighted_loss, optimizer_update)
 from .relation_metrics import binary_metrics, distance_metrics
+from .trajectory_visitation import VisitationMetrics
+from .experiment_protocol import (RNG_PROTOCOL, DiffusionStreams, stream_seed, branch_rng,
+                                  audit_scratch_initialization, gradient_probe, gradient_report)
 
 
 def seed_all(seed):
@@ -42,10 +43,6 @@ def seed_worker(worker_id):
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
     np.random.seed(seed)
-
-
-def stream_seed(seed, epoch, stream, cycle=0):
-    return int.from_bytes(hashlib.sha256(f"{seed}:{epoch}:{stream}:{cycle}".encode()).digest()[:8], "big")
 
 
 @contextmanager
@@ -107,11 +104,13 @@ def build_action_dataset(bundle, split, config):
 
 
 def make_optimizer(model, config):
-    groups = {name: [] for name in ("vision", "transformer", "temporal", "diffusion", "relation")}
+    groups = {name: [] for name in ("vision", "transformer", "temporal", "diffusion", "relation", "spatial")}
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             raise ValueError(f"Scratch training must not freeze {name}")
-        if name.startswith("vision_encoder.sa_"):
+        if name.startswith("vision_encoder.spatial_bottleneck."):
+            group = "spatial"
+        elif name.startswith("vision_encoder.sa_"):
             group = "transformer"
         elif name.startswith("vision_encoder."):
             group = "vision"
@@ -151,18 +150,6 @@ def autocast(config, device):
     return torch.cuda.amp.autocast(dtype=torch.float16) if config["amp"] and device.type == "cuda" else nullcontext()
 
 
-def gradient_probe(loss, model):
-    named = dict(model.named_parameters())
-    names = ("vision_encoder.compress_obs_enc.weight",
-             f"vision_encoder.sa_encoder.layers.{len(model.vision_encoder.sa_encoder.layers)-1}.linear2.weight")
-    parameters = [named[n] for n in names if n in named]
-    if not parameters or loss is None:
-        return None
-    gradients = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
-    return torch.cat([(torch.zeros_like(p) if g is None else g).detach().float().flatten().cpu()
-                      for p, g in zip(parameters, gradients)])
-
-
 def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                 relation_dataset, config, device, epoch, successful_steps, folder):
     model.train()
@@ -170,25 +157,35 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                               stream_seed(config["seed"], epoch, "action")))
     relation_stream = RelationStream(relation_dataset, config, epoch) if relation_dataset is not None else None
     mask_generator = torch.Generator().manual_seed(stream_seed(config["seed"], epoch, "mask"))
+    diffusion_streams = DiffusionStreams(config["seed"], epoch, device)
     totals = {k: 0 for k in ("windows", "updates", "amp_skips", "unsupervised_windows", "action_samples",
                              "relation_samples", "r3_positive_count", "r3_negative_count", "r3_unknown_count",
-                             "r3_distance_valid_count")}
+                             "r3_distance_valid_count", "action_supervised_samples", "temporal_visible_samples",
+                             "updated_action_samples", "updated_action_supervised_samples", "updated_relation_samples",
+                             "updated_visitation_valid_samples")}
     objectives = []
     alpha = float(config["alpha"])
     r3 = config.get("r3", {})
+    r1 = config.get("r1", {})
+    r1_enabled = r1.get("enabled", False)
+    visitation = VisitationMetrics(r1.get("visitation_head_trained", False), r1.get("prior_probability")) if r1_enabled else None
     while True:
         window = list(itertools.islice(actions, config["gradient_accumulation_steps"]))
         if not window:
             break
         relations = [relation_stream.next() for _ in window] if relation_stream else []
         masks = [(torch.rand(len(batch[0]), generator=mask_generator) < config["goal_mask_prob"]).long() for batch in window]
-        denom = window_denominators(window, masks, relations)
+        denom = window_denominators(window, masks, relations, config)
         weight = relation_weight(successful_steps, r3.get("lambda_start", .1), r3.get("lambda_end", 1.), r3.get("warmup_steps", 500))
         weights_a = {"action": 1 - alpha, "temporal": alpha}
+        if r1_enabled:
+            weights_a["visitation"] = r1["lambda_visitation"]
         weights_r = {"reach": weight * r3.get("lambda_reach", 1.),
                      "distance": weight * r3.get("lambda_distance", 1.)}
         totals["windows"] += 1
         totals["action_samples"] += denom["action_samples"]
+        totals["action_supervised_samples"] += denom["action_count"]
+        totals["temporal_visible_samples"] += denom["temporal_count"]
         for batch in relations:
             totals["relation_samples"] += len(batch["obs_image"])
             known = batch["reach_valid"]
@@ -198,26 +195,34 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
             totals["r3_distance_valid_count"] += int(batch["distance_valid"].sum())
         optimizer.zero_grad(set_to_none=True)
         sums_cpu = {key: 0.0 for key in ("action", "temporal", "reach", "distance")}
+        if r1_enabled:
+            sums_cpu["visitation"] = 0.0
         objective, backward_count = 0.0, 0
-        probe_a = probe_r = None
+        probe_a = probe_r = probe_v = None
         probe_every = config.get("gradient_probe_every", 200)
         probe = probe_every > 0 and successful_steps % probe_every == 0
         for index, (batch, mask) in enumerate(zip(window, masks)):
-            if (denom["action_count"] and weights_a["action"] > 0) or (denom["temporal_count"] and weights_a["temporal"] > 0):
-                with autocast(config, device):
-                    sums = action_loss_sums(model, batch, mask, noise_scheduler, config, device, config["activation_checkpointing"])
+            microbatch = (totals["windows"] - 1) * config["gradient_accumulation_steps"] + index
+            if ((denom["action_count"] and weights_a["action"] > 0)
+                    or (denom["temporal_count"] and weights_a["temporal"] > 0)
+                    or (denom.get("visitation", 0) and weights_a.get("visitation", 0) > 0)):
+                with branch_rng(stream_seed(config["seed"], epoch, "action_forward", microbatch), device), autocast(config, device):
+                    sums = action_loss_sums(model, batch, mask, noise_scheduler, config, device,
+                                            config["activation_checkpointing"], visitation, diffusion_streams)
                     loss = weighted_loss(sums, denom, weights_a)
                 for key, value in sums.items():
                     sums_cpu[key] += float(value.detach())
                 if loss is not None:
                     if probe and index == 0:
-                        probe_a = gradient_probe(loss, model)
+                        probe_a = gradient_probe(weighted_loss(sums, denom, {"action": 1 - alpha, "temporal": alpha}), model)
+                        if r1_enabled:
+                            probe_v = gradient_probe(weighted_loss(sums, denom, {"visitation": r1["lambda_visitation"]}), model)
                     objective += float(loss.detach())
                     scaler.scale(loss).backward()
                     backward_count += 1
                 del sums, loss
             if relations and ((denom["reach"] and weights_r["reach"] > 0) or (denom["distance"] and weights_r["distance"] > 0)):
-                with autocast(config, device):
+                with branch_rng(stream_seed(config["seed"], epoch, "relation_forward", microbatch), device), autocast(config, device):
                     sums = relation_loss_sums(model, relations[index], config, device, config["activation_checkpointing"])
                     loss = weighted_loss(sums, denom, weights_r)
                 for key, value in sums.items():
@@ -233,16 +238,24 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                   "lambda_r3": weight, "window_denominators": denom,
                   "losses": {k: sums_cpu[k] / denom[k] if denom[k] else None for k in sums_cpu},
                   "objective": objective, "learning_rates": {g["name"]: g["lr"] for g in optimizer.param_groups}}
-        if probe_a is not None and probe_r is not None:
-            record["sampled_anchor_gradients"] = {
-                "nomad_norm": float(probe_a.norm()), "r3_norm": float(probe_r.norm()),
-                "cosine": float(torch.nn.functional.cosine_similarity(probe_a[None], probe_r[None]))}
+        if r1_enabled:
+            record["lambda_visitation"] = r1["lambda_visitation"]
+            record["visitation_head_trained"] = r1["visitation_head_trained"]
+            if not r1["visitation_head_trained"]:
+                record["losses"]["visitation"] = None
+        if probe:
+            record["sampled_branch_gradients"] = gradient_report({"nomad": probe_a, "visitation": probe_v, "r3": probe_r})
         if backward_count:
             did_update, norm = optimizer_update(model, optimizer, scaler, config["max_norm"])
             record.update(did_update=did_update, grad_norm_before_clip=norm, amp_scale=scaler.get_scale())
             if did_update:
                 successful_steps += 1
                 totals["updates"] += 1
+                totals["updated_action_samples"] += denom["action_samples"]
+                totals["updated_action_supervised_samples"] += denom["action_count"]
+                totals["updated_relation_samples"] += sum(len(batch["obs_image"]) for batch in relations)
+                if r1_enabled and r1["lambda_visitation"] > 0:
+                    totals["updated_visitation_valid_samples"] += denom["visitation"]
                 ema.step(model)
                 objectives.append(objective)
             else:
@@ -258,6 +271,8 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
     totals["relation_cycles_restarted"] = relation_stream.cycle if relation_stream else 0
     totals["relation_repeated_samples"] = max(0, totals["relation_samples"] - len(relation_dataset)) if relation_dataset is not None else 0
     totals["r3_valid_ratio"] = ((totals["r3_positive_count"] + totals["r3_negative_count"]) / totals["relation_samples"] if totals["relation_samples"] else None)
+    if visitation is not None:
+        totals["visitation"] = visitation.report()
     return totals, successful_steps
 
 
@@ -289,14 +304,22 @@ def evaluate(model, action_dataset, relation_dataset, config, device, epoch):
             for mode in ("random", "goal", "goal_free"):
                 # Keep NumPy goal sampling identical across the three modes.
                 seed_all(stream_seed(config["seed"], epoch, "eval_action"))
+                mask_generator = torch.Generator().manual_seed(stream_seed(config["seed"], epoch, "eval_mask"))
+                diffusion_streams = DiffusionStreams(config["seed"], epoch, device, namespace="evaluation")
                 numerator_a = numerator_t = denominator_a = denominator_t = 0.0
                 sampler_metrics = []
+                r1 = config.get("r1", {})
+                visitation = (VisitationMetrics(r1.get("visitation_head_trained", False), r1.get("prior_probability"),
+                              token_permutation=r1.get("visitation_head_trained", False)
+                              and r1.get("representation", "query_tokens") != "global_condition")
+                              if r1.get("enabled", False) else None)
                 for index, batch in enumerate(loader_for(action_dataset, config["eval_batch_size"], 0,
                                                   stream_seed(config["seed"], epoch, "eval_action"), shuffle=False)):
-                    masks = ((torch.rand(len(batch[0])) < config["goal_mask_prob"]).long() if mode == "random" else
+                    masks = ((torch.rand(len(batch[0]), generator=mask_generator) < config["goal_mask_prob"]).long() if mode == "random" else
                              torch.full((len(batch[0]),), int(mode == "goal_free"), dtype=torch.long))
-                    sums = action_loss_sums(model, batch, masks, scheduler, config, device)
-                    denom = window_denominators([batch], [masks], [])
+                    sums = action_loss_sums(model, batch, masks, scheduler, config, device,
+                                            visitation_metrics=visitation, diffusion_streams=diffusion_streams)
+                    denom = window_denominators([batch], [masks], [], config)
                     numerator_a += float(sums["action"])
                     numerator_t += float(sums["temporal"])
                     denominator_a += denom["action"]
@@ -305,13 +328,16 @@ def evaluate(model, action_dataset, relation_dataset, config, device, epoch):
                         valid = batch[6] > 0
                         condition = model("vision_encoder", obs_img=normalize_rgb(batch[0][valid].to(device)),
                                           goal_img=normalize_rgb(batch[1][valid].to(device)), input_goal_mask=masks[valid].to(device))
-                        samples = sample_conditioned_actions(model, condition, config, config.get("eval_action_samples", 4))
+                        with branch_rng(stream_seed(config["seed"], epoch, "eval_sampler", index), device):
+                            samples = sample_conditioned_actions(model, condition, config, config.get("eval_action_samples", 4))
                         target = batch[2][valid].to(device) * config["action_scale_m"]
                         ade = (samples - target[:, None]).norm(dim=-1).mean(dim=-1)
                         sampler_metrics.append({"mean_ADE_m": float(ade.mean()), "min_ADE_m": float(ade.min(dim=1).values.mean()),
                                                 "sample_spread_m": float((samples - samples.mean(dim=1, keepdim=True)).norm(dim=-1).mean())})
                 result[mode] = {"diffusion_loss": numerator_a / denominator_a if denominator_a else None,
                                 "temporal_loss": numerator_t / denominator_t if denominator_t and mode != "goal_free" else None}
+                if visitation is not None:
+                    result[mode]["visitation"] = visitation.report()
                 if sampler_metrics:
                     result[mode].update({key: float(np.mean([m[key] for m in sampler_metrics])) for key in sampler_metrics[0]})
         if relation_dataset is not None and len(relation_dataset):
@@ -327,6 +353,9 @@ def run_habitat_scratch(config):
     config = copy.deepcopy(config)
     if config.get("load_run") or config.get("pretrained_checkpoint") or config.get("init_from"):
         raise ValueError("habitat_scratch forbids pretrained initialization; use resume_from only for complete v2 runs")
+    if config.get("initialization", "scratch") != "scratch":
+        raise ValueError("This experiment protocol requires initialization: scratch")
+    config["initialization"] = "scratch"
     if config["model_type"] != "nomad" or config["vision_encoder"] != "nomad_vint" or config.get("learn_angle") or not config.get("normalize", True):
         raise ValueError("Habitat scratch v1 requires normalized XY NoMaD_ViNT")
     defaults = {"batch_size": 4, "relation_batch_size": 4, "eval_batch_size": 4,
@@ -383,6 +412,22 @@ def run_habitat_scratch(config):
     config["action_scale_m"] = bundle["manifest"]["action_scale_m"]
     config["action_time_step_s"] = bundle["manifest"]["action_time_step_s"]
     config["observation_stride"] = bundle["manifest"]["waypoint_spacing"]
+    r1_statistics = None
+    if config.get("r1", {}).get("enabled", False):
+        from vint_train.data.trajectory_regions import load_region_statistics
+        r1 = config["r1"]
+        coefficient = float(r1.get("lambda_visitation", .1))
+        if not math.isfinite(coefficient) or coefficient < 0:
+            raise ValueError("r1.lambda_visitation must be finite and nonnegative")
+        if r1.get("mode", "bottleneck") == "auxiliary" and coefficient == 0:
+            raise ValueError("R1 auxiliary mode requires positive visitation supervision")
+        path = config["simulation"].get("r1_statistics")
+        if not path:
+            raise ValueError("Set simulation.r1_statistics; fit it with prepare_r1_data on train trajectories")
+        definition, fingerprint, r1_statistics = load_region_statistics(path, bundle, config)
+        r1.update(discretization=definition, statistics_sha256=fingerprint,
+                  lambda_visitation=coefficient, visitation_head_trained=coefficient > 0,
+                  prior_probability=r1_statistics["visitation_prior"]["probability_flat"])
     config.setdefault("r3", {})["label_definition"] = bundle["manifest"]["label_definition"]
     enabled = config["r3"].get("enabled", False)
     if enabled:
@@ -410,8 +455,10 @@ def run_habitat_scratch(config):
     folder = Path(config["project_folder"])
     folder.mkdir(parents=True, exist_ok=True)
     # Common parameters are constructed before the new head, for matched seeds.
-    model = build_model(config).to(device)
-    initial_common_sha256 = weights_sha256(model, exclude_prefixes=("goal_relation_head.",))
+    seed_all(config["seed"])
+    model = build_model(config)
+    initialization_audit = audit_scratch_initialization(model, config)
+    model.to(device)
     optimizer = make_optimizer(model, config)
     warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=.1, end_factor=1., total_iters=config["warmup_epochs"])
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"] - config["warmup_epochs"])
@@ -429,8 +476,12 @@ def run_habitat_scratch(config):
             "amp", "activation_checkpointing", "max_norm", "warmup_epochs", "num_workers", "alpha", "goal_mask_prob",
             "distance", "action", "context_size", "len_traj_pred", "action_stats", "action_scale_m", "action_time_step_s", "observation_stride", "r3")
     spec = {key: copy.deepcopy(config.get(key)) for key in keys}
-    spec.update(initialization="scratch", epoch_basis="action_dataset", sampler_version=1,
+    spec.update(initialization="scratch", epoch_basis="action_dataset", sampler_version=2,
+                rng_protocol=RNG_PROTOCOL,
                 normalization="window_sums; nomad_count+0.01B; relation_valid_count", lr_start_factor=.1)
+    if config.get("r1", {}).get("enabled", False):
+        spec["r1"] = copy.deepcopy(config["r1"])
+        spec["normalization"] += "; visitation_valid_sample_count"
     epoch_start = successful_steps = 0
     if config.get("resume_from"):
         saved = torch.load(config["resume_from"], map_location="cpu", weights_only=False)
@@ -438,10 +489,28 @@ def run_habitat_scratch(config):
     (folder / "resolved_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
     (folder / "dataset_manifest.json").write_text(json.dumps({"manifest": bundle["manifest"],
                                                             "files": bundle["file_hashes"]}, indent=2, allow_nan=False))
+    if r1_statistics is not None:
+        (folder / "r1_statistics.json").write_text(json.dumps(r1_statistics, indent=2, allow_nan=False) + "\n")
     compatibility_only = [n for n, _ in model.named_parameters() if ".sa_layer." in n or "._fc." in n]
+    inactive_r1 = []
+    if config.get("r1", {}).get("enabled", False):
+        r1 = config["r1"]
+        prefixes = []
+        if r1.get("mode", "bottleneck") == "auxiliary":
+            prefixes.extend(("condition_query.", "readout_attention.", "residual_projection."))
+        if not r1["visitation_head_trained"]:
+            prefixes.extend(("visitation_context.", "visitation_head."))
+        inactive_r1 = ["vision_encoder.spatial_bottleneck." + name for name, _ in
+                       model.vision_encoder.spatial_bottleneck.named_parameters() if name.startswith(tuple(prefixes))]
     (folder / "provenance.json").write_text(json.dumps({"data_fingerprint": bundle["fingerprint"],
-        "initial_common_weights_sha256": initial_common_sha256,
-        "training_spec": spec, "compatibility_parameters_not_used_in_forward": compatibility_only,
+        **initialization_audit,
+        "training_spec": spec, "model_config": model._model_config,
+        "compatibility_parameters_not_used_in_forward": compatibility_only,
+        "r1_ablation_parameters_without_task_loss": inactive_r1,
+        "parameter_counts": {"total": sum(p.numel() for p in model.parameters()),
+            "by_optimizer_group": {g["name"]: sum(p.numel() for p in g["params"]) for g in optimizer.param_groups},
+            "excluding_known_unused": sum(p.numel() for n, p in model.named_parameters()
+                                            if n not in set(compatibility_only + inactive_r1))},
         "resume_from": config.get("resume_from"), "torch_version": torch.__version__}, indent=2))
     for epoch in range(epoch_start, config["epochs"]):
         started = time.monotonic()

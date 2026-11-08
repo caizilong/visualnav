@@ -69,16 +69,20 @@ class NoMaD_ViNT(nn.Module):
         self.avg_pool_mask = torch.cat([1 - self.no_mask.float(), (1 - self.goal_mask.float()) * ((self.context_size + 2)/(self.context_size + 1))], dim=0)
 
 
-    def forward(self, obs_img: torch.tensor, goal_img: torch.tensor, input_goal_mask: torch.tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs_img: torch.Tensor, goal_img: torch.Tensor,
+                input_goal_mask: torch.Tensor = None, return_r1: bool = False):
 
         device = obs_img.device
+        batch_size = obs_img.shape[0]
+        spatial = getattr(self, "spatial_bottleneck", None)
+        if return_r1 and spatial is None:
+            raise ValueError("Spatial outputs require an R1 model")
 
         # Initialize the goal encoding
         goal_encoding = torch.zeros((obs_img.size()[0], 1, self.goal_encoding_size)).to(device)
         
         # Get the input goal mask 
-        if input_goal_mask is not None:
-            goal_mask = input_goal_mask.to(device)
+        goal_mask = input_goal_mask.to(device) if input_goal_mask is not None else None
 
         # Get the goal encoding
         obsgoal_img = torch.cat([obs_img[:, 3*self.context_size:, :, :], goal_img], dim=1) # concatenate the obs image/context and goal image --> non image goal?
@@ -100,6 +104,9 @@ class NoMaD_ViNT(nn.Module):
         obs_img = torch.concat(obs_img, dim=0)
 
         obs_encoding = self.obs_encoder.extract_features(obs_img)
+        # torch.concat above is frame-major: [oldest batch, ..., current batch].
+        # Retain only the current frame's spatial features for the R1 branch.
+        current_features = obs_encoding[-batch_size:] if spatial is not None else None
         obs_encoding = self.obs_encoder._avg_pooling(obs_encoding)
         if self.obs_encoder._global_params.include_top:
             obs_encoding = obs_encoding.flatten(start_dim=1)
@@ -127,7 +134,29 @@ class NoMaD_ViNT(nn.Module):
             obs_encoding_tokens = obs_encoding_tokens * avg_mask
         obs_encoding_tokens = torch.mean(obs_encoding_tokens, dim=1)
 
+        if spatial is not None and (self.r1_mode == "bottleneck" or return_r1):
+            spatial_tokens = (spatial.encode(current_features)
+                              if spatial.representation != "global_condition" else None)
+            base_condition = obs_encoding_tokens
+            if self.r1_mode == "bottleneck":
+                obs_encoding_tokens = spatial.fuse(base_condition, spatial_tokens)
+            if return_r1:
+                # The same auxiliary predictor is used with and without feedback.
+                return {"condition": obs_encoding_tokens, "base_condition": base_condition,
+                        "spatial_tokens": spatial_tokens,
+                        "visitation_logits": spatial.predict_visitation(spatial_tokens, base_condition)}
         return obs_encoding_tokens
+
+    def extract_spatial_tokens(self, obs_img: torch.Tensor):
+        """Goal-independent RGB tokens, without attaching occupancy semantics."""
+        if not hasattr(self, "spatial_bottleneck"):
+            raise ValueError("Spatial outputs require an R1 model")
+        if self.spatial_bottleneck.representation == "global_condition":
+            raise ValueError("The global-condition control has no spatial tokens")
+        if obs_img.ndim != 4 or obs_img.shape[1] != 3 * (self.context_size + 1):
+            raise ValueError("Expected RGB history [B,3*(context_size+1),H,W]")
+        features = self.obs_encoder.extract_features(obs_img[:, -3:])
+        return self.spatial_bottleneck.encode(features)
 
 
 
@@ -184,7 +213,3 @@ def replace_submodules(
         if predicate(m)]
     assert len(bn_list) == 0
     return root_module
-
-
-
-    

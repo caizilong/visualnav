@@ -33,6 +33,9 @@ def main(config):
     if config.get("training_profile") == "habitat_scratch":
         from vint_train.training.simulation_train import run_habitat_scratch
         return run_habitat_scratch(config)
+    if config.get("r1", {}).get("enabled", False):
+        raise ValueError("R1 requires the Habitat trajectory-visitation trainer; "
+                         "the legacy training loop does not implement its loss")
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
 
@@ -304,7 +307,10 @@ if __name__ == "__main__":
         help="Path to the config file in train_config folder",
     )
     parser.add_argument("--ablation", choices=("baseline", "r_only", "r_d"),
-                        help="Habitat scratch controls with shared model/data defaults")
+                        help="Habitat R3 control; combine with --r1-mode for R1 experiments")
+    parser.add_argument("--r1-mode", choices=("off", "bottleneck", "auxiliary", "tokens_only",
+                                             "global_auxiliary", "pooled_auxiliary", "pooled_bottleneck"),
+                        help="R1 feedback/supervision ablations plus global and fixed-pooling controls")
     parser.add_argument("--resume", help="Resume a matching full v2 scratch checkpoint at its next epoch")
     args = parser.parse_args()
 
@@ -318,15 +324,29 @@ if __name__ == "__main__":
 
     config.update(user_config)
 
-    if args.ablation or args.resume:
+    if args.ablation or args.resume or args.r1_mode:
         if config.get("training_profile") != "habitat_scratch":
-            parser.error("--ablation and --resume require training_profile: habitat_scratch")
+            parser.error("--ablation, --r1-mode and --resume require training_profile: habitat_scratch")
     if args.ablation:
         relation = config.setdefault("r3", {})
         relation["enabled"] = args.ablation != "baseline"
         relation["lambda_distance"] = 1. if args.ablation == "r_d" else 0.
         relation.setdefault("selector", {})["use_distance"] = args.ablation == "r_d"
         config["run_name"] += "_" + args.ablation
+    if args.r1_mode:
+        spatial = config.setdefault("r1", {})
+        spatial["enabled"] = args.r1_mode != "off"
+        if args.r1_mode != "off":
+            spatial["mode"] = "auxiliary" if args.r1_mode.endswith("auxiliary") else "bottleneck"
+            spatial["representation"] = ("global_condition" if args.r1_mode == "global_auxiliary" else
+                                         "pooled_spatial" if args.r1_mode.startswith("pooled_") else "query_tokens")
+            if args.r1_mode == "tokens_only":
+                spatial["lambda_visitation"] = 0.
+            else:
+                spatial.setdefault("lambda_visitation", .1)
+                if float(spatial["lambda_visitation"]) <= 0:
+                    parser.error("Supervised R1 modes require a positive r1.lambda_visitation")
+        config["run_name"] += "_r1_" + args.r1_mode
     if args.resume:
         config["resume_from"] = args.resume
 

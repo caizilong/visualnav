@@ -14,6 +14,34 @@ def make_noise_scheduler(config):
 
 
 @torch.no_grad()
+def predict_rgb_visitation(model, obs_images, goal_images=None, goal_mask=None):
+    """Optional R1 diagnostic: expected waypoint visitation, NOT occupancy.
+
+    No goal image means goal-free mode. Use an eval-mode model. The auxiliary
+    head is not called by normal navigation and never replaces R3 selection.
+    The global_auxiliary control returns spatial_tokens=None; other modes
+    return the query tokens or fixed-pooling spatial slots.
+    """
+    r1 = model._model_config.get("r1", {})
+    if not r1.get("enabled") or not r1.get("visitation_head_trained"):
+        raise ValueError("Visitation prediction requires a supervised R1 checkpoint")
+    if model.training:
+        raise ValueError("Call model.eval() before R1 diagnostics")
+    if goal_images is None:
+        if goal_mask is not None and (goal_mask != 1).any():
+            raise ValueError("No goal image requires goal_mask=1")
+        goal_images = torch.zeros_like(obs_images[:, -3:])
+        goal_mask = torch.ones(len(obs_images), dtype=torch.long, device=obs_images.device)
+    elif goal_mask is None:
+        goal_mask = torch.zeros(len(obs_images), dtype=torch.long, device=obs_images.device)
+    result = model("vision_encoder", obs_img=normalize_rgb(obs_images),
+                   goal_img=normalize_rgb(goal_images), input_goal_mask=goal_mask, return_r1=True)
+    logits = result["visitation_logits"]
+    result["visitation_probability"] = logits.float().flatten(1).softmax(dim=-1).reshape_as(logits)
+    return result
+
+
+@torch.no_grad()
 def score_rgb_pairs(model, obs_images, goal_images, temperature=1.0):
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError("Temperature must be positive")
