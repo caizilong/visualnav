@@ -1,8 +1,3 @@
-import os
-import argparse
-import time
-import pdb
-
 import torch
 import torch.nn as nn
 
@@ -24,12 +19,12 @@ class NoMaD(nn.Module):
     
     def forward(self, func_name, **kwargs):
         if func_name == "vision_encoder":
-            extra = {"return_r1": True} if kwargs.get("return_r1", False) else {}
+            extra = {"return_visitation": True} if kwargs.get("return_visitation", False) else {}
             output = self.vision_encoder(kwargs["obs_img"], kwargs["goal_img"],
                                          input_goal_mask=kwargs["input_goal_mask"], **extra)
         elif func_name == "spatial_tokens":
             if not hasattr(self.vision_encoder, "extract_spatial_tokens"):
-                raise ValueError("Spatial outputs require an R1 NoMaD_ViNT model")
+                raise ValueError("Spatial outputs require an SPATIAL_BOTTLENECK NoMaD_ViNT model")
             output = self.vision_encoder.extract_spatial_tokens(kwargs["obs_img"])
         elif func_name == "noise_pred_net":
             output = self.noise_pred_net(sample=kwargs["sample"], timestep=kwargs["timestep"], global_cond=kwargs["global_cond"])
@@ -37,7 +32,7 @@ class NoMaD(nn.Module):
             output = self.dist_pred_net(kwargs["obsgoal_cond"])
         elif func_name == "goal_relation_head":
             if not hasattr(self, "goal_relation_head"):
-                raise ValueError("This checkpoint has no R3 goal relation head")
+                raise ValueError("This checkpoint has no GOAL_RELATION goal relation head")
             output = self.goal_relation_head(kwargs["obsgoal_cond"])
         else:
             raise NotImplementedError

@@ -62,9 +62,9 @@ def validate_label_definition(labels):
     if labels["label_schema_version"] != 1 or labels["distance_unit"] != "meter":
         raise ValueError("Expected label schema 1 with meter distances")
     if labels["motion_constraint_id"] != "static_footprint_holonomic":
-        raise ValueError("R3 v1 labels describe static footprint geometry, not vehicle dynamics")
+        raise ValueError("GOAL_RELATION v1 labels describe static footprint geometry, not vehicle dynamics")
     if labels["query_region"] != "full_scene_navmesh":
-        raise ValueError("R3 v1 requires full_scene_navmesh queries")
+        raise ValueError("GOAL_RELATION v1 requires full_scene_navmesh queries")
     result = dict(labels)
     result["max_path_length_m"] = positive(labels["max_path_length_m"], "max_path_length_m")
     tolerance = float(labels["max_projection_error_m"])

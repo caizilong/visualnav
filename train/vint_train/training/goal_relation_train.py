@@ -10,7 +10,7 @@ from vint_train.models.action_codec import normalize_actions, normalize_rgb
 
 def relation_weight(successful_steps, start=0.1, end=1.0, warmup_steps=500):
     if not all(math.isfinite(x) for x in (start, end)) or not 0 < start <= end or warmup_steps < 0:
-        raise ValueError("R3 loss warmup must start positive and be nondecreasing")
+        raise ValueError("GOAL_RELATION loss warmup must start positive and be nondecreasing")
     return end if warmup_steps == 0 else start + (end - start) * min(1, successful_steps / warmup_steps)
 
 
@@ -23,7 +23,7 @@ def window_denominators(action_batches, goal_masks, relation_batches, config=Non
     result = {"action": action_count + .01 * b, "temporal": temporal_count + .01 * b,
             "reach": r_count, "distance": d_count, "action_count": action_count,
             "temporal_count": temporal_count, "action_samples": b}
-    if config is not None and config.get("r1", {}).get("enabled", False):
+    if config is not None and config.get("spatial_bottleneck", {}).get("enabled", False):
         from .trajectory_visitation import visitation_targets
         result["visitation"] = sum(int(visitation_targets(batch, config)[1].sum()) for batch in action_batches)
     return result
@@ -44,9 +44,9 @@ def action_loss_sums(model, batch, goal_mask, scheduler, config, device, activat
                      visitation_metrics=None, diffusion_streams=None):
     obs, goal, actions, distance, _, _, action_mask = batch
     mask = goal_mask.to(device)
-    r1 = config.get("r1", {})
-    predict_visitation = r1.get("enabled", False) and r1.get("visitation_head_trained", True)
-    extra = {"return_r1": True} if predict_visitation else {}
+    spatial_bottleneck = config.get("spatial_bottleneck", {})
+    predict_visitation = spatial_bottleneck.get("enabled", False) and spatial_bottleneck.get("visitation_head_trained", True)
+    extra = {"return_visitation": True} if predict_visitation else {}
     encoded = model_call(model, "vision_encoder", activation_checkpointing,
                            obs_img=normalize_rgb(obs.to(device)), goal_img=normalize_rgb(goal.to(device)),
                            input_goal_mask=mask, **extra)
@@ -71,7 +71,7 @@ def action_loss_sums(model, batch, goal_mask, scheduler, config, device, activat
         per_sample = (pred.float() - noise).square().mean(dim=(1, 2))
         action = per_sample[valid_action].sum()
     sums = {"action": action, "temporal": temporal}
-    if r1.get("enabled", False):
+    if spatial_bottleneck.get("enabled", False):
         from .trajectory_visitation import visitation_targets, visitation_loss_sum
         target, valid, counts = visitation_targets(batch, config, device)
         logits = encoded["visitation_logits"] if predict_visitation else None
@@ -97,10 +97,10 @@ def relation_loss_sums(model, batch, config, device, activation_checkpointing=Fa
         reach = F.binary_cross_entropy_with_logits(output["reachability_logit"][valid_r],
                                                    batch["reachable"].to(device)[valid_r], reduction="sum")
     if valid_d.any():
-        bound = config["r3"]["label_definition"]["max_path_length_m"]
+        bound = config["goal_relation"]["label_definition"]["max_path_length_m"]
         distance = F.smooth_l1_loss(output["distance_m"][valid_d] / bound,
                                    batch["distance_m"].to(device)[valid_d] / bound,
-                                   beta=config["r3"].get("distance_beta", .1), reduction="sum")
+                                   beta=config["goal_relation"].get("distance_beta", .1), reduction="sum")
     return {"reach": reach, "distance": distance}
 
 

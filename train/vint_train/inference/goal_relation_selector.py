@@ -63,7 +63,7 @@ def legal_candidate_nodes(base_subgoal, completed_through, route_nodes,
     if len(set(route_nodes)) != len(route_nodes) or base_subgoal not in route_nodes:
         raise ValueError("Route must contain unique nodes and the base subgoal")
     if max_forward_skip not in (0, 1, 2):
-        raise ValueError("R3 v1 permits at most two forward skips")
+        raise ValueError("GOAL_RELATION v1 permits at most two forward skips")
     positions = {node: i for i, node in enumerate(route_nodes)}
     if any(n not in positions for n in list(required_nodes) + list(broken_after)):
         raise ValueError("Required nodes / breaks must belong to the route")
@@ -127,7 +127,7 @@ class GoalRelationSelector:
                 or not all(math.isfinite(x) and x > 0 for x in (rejection_timeout_s, stale_timeout_s, max_path_length_m))):
             raise ValueError("Timeouts, rejection count, and H must be positive")
         if max_forward_skip not in (0, 1, 2):
-            raise ValueError("R3 v1 permits at most two forward skips")
+            raise ValueError("GOAL_RELATION v1 permits at most two forward skips")
         self.threshold, self.horizon = threshold, max_path_length_m
         self.max_rejections, self.rejection_timeout_s = max_rejections, rejection_timeout_s
         self.stale_timeout_s, self.use_distance = stale_timeout_s, use_distance

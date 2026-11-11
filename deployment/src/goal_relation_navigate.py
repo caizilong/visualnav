@@ -24,12 +24,12 @@ from vint_train.inference.goal_relation_selector import (GoalRelationSelector, l
 from vint_train.inference.rgb_policy import score_rgb_pairs, sample_conditioned_actions
 
 
-STATUS_TOPIC = "/topoplan/r3_status"
+STATUS_TOPIC = "/topoplan/goal_relation_status"
 RESET_TOPIC = "/topoplan/reset_episode"
 
 
 def run_navigation(args, model, config, topomap_root, device):
-    with ROS2Runtime("r3_navigation") as ros:
+    with ROS2Runtime("goal_relation_navigation") as ros:
         return _run_navigation(args, model, config, topomap_root, device, ros)
 
 
@@ -37,7 +37,7 @@ def _run_navigation(args, model, config, topomap_root, device, ros):
     spec = selector_spec(config)
     if args.radius != spec["radius"] or args.close_threshold != spec["close_threshold"]:
         raise ValueError("CLI radius/close-threshold must match the saved decision settings")
-    enabled = config.get("r3", {}).get("enabled", False)
+    enabled = config.get("goal_relation", {}).get("enabled", False)
     if enabled and args.calibration:
         artifact = load_calibration(args.calibration, model, config)
         temperature, threshold = artifact["temperature"], artifact["threshold"]
@@ -46,8 +46,8 @@ def _run_navigation(args, model, config, topomap_root, device, ros):
         raise ValueError("Supply --calibration, or explicitly use --allow-uncalibrated for debugging")
     else:
         temperature, threshold, calibrated = 1., .5, False
-    horizon = config["r3"]["label_definition"]["max_path_length_m"]
-    runtime = config.get("r3", {}).get("runtime", {})
+    horizon = config["goal_relation"]["label_definition"]["max_path_length_m"]
+    runtime = config.get("goal_relation", {}).get("runtime", {})
     selector = GoalRelationSelector(threshold, horizon, runtime.get("max_rejections", 3),
                                     runtime.get("rejection_timeout_s", 2.), runtime.get("stale_timeout_s", 2.),
                                     spec["use_distance"] if enabled else False, spec["max_forward_skip"] if enabled else 0)
@@ -160,7 +160,7 @@ def _run_navigation(args, model, config, topomap_root, device, ros):
     thread = threading.Thread(target=watchdog, daemon=True)
     thread.start()
     last_processed = None
-    print(f"R3={enabled}, calibrated={calibrated}, action_scale_m={config['action_scale_m']}; RGB only")
+    print(f"GOAL_RELATION={enabled}, calibrated={calibrated}, action_scale_m={config['action_scale_m']}; RGB only")
     try:
         while ros.ok():
             with lock:

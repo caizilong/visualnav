@@ -20,13 +20,13 @@ A compatible existing Python 3.10 training environment can also run these nodes 
 
 ## Start the policy and controller
 
-Configure model/config paths in `deployment/config/models.yaml`. Its existing relative paths resolve against `deployment/src`, even when launched elsewhere. Copy the R3 run's `resolved_config.yaml` and complete checkpoint into `deployment/model_weights/r3/`.
+Configure model/config paths in `deployment/config/models.yaml`. Its existing relative paths resolve against `deployment/src`, even when launched elsewhere. For navigation with the goal relation module, copy the run's `resolved_config.yaml` and complete checkpoint into `deployment/model_weights/goal_relation/`.
 
 ```bash
-# R3 navigation: supply calibration for the same weights and selector settings.
-bash deployment/src/navigate.sh --model nomad_r3 --dir topomap --calibration /path/to/calibration.json
+# Supply calibration for the same weights and subgoal selector settings.
+bash deployment/src/navigate.sh --model nomad_goal_relation --dir topomap --calibration /path/to/calibration.json
 # Goal-free exploration also supports metric simulation checkpoints.
-bash deployment/src/explore.sh --model nomad_r3
+bash deployment/src/explore.sh --model nomad_goal_relation
 # Legacy weights use the legacy waypoint scale.
 bash deployment/src/navigate.sh --model nomad --dir topomap
 ```
@@ -35,8 +35,8 @@ The wrappers start both processes and choose the controller mode from the model 
 
 ```bash
 python deployment/src/pd_controller.py --control-mode metric
-python deployment/src/navigate.py --model nomad_r3 --dir topomap --calibration /path/to/calibration.json
-# Or: python deployment/src/explore.py --model nomad_r3
+python deployment/src/navigate.py --model nomad_goal_relation --dir topomap --calibration /path/to/calibration.json
+# Or: python deployment/src/explore.py --model nomad_goal_relation
 ```
 
 Use `--control-mode legacy` with legacy models. The mode is fixed for the controller process; restart it to switch. Metric controllers subscribe only to the metric command topic, so an old `/waypoint` publisher cannot drive them. Heartbeat loss always stops the robot and never changes the command mode.
@@ -49,17 +49,17 @@ Use `--control-mode legacy` with legacy models. The mode is fixed for the contro
 | `/topoplan/metric_waypoint` | `std_msgs/msg/Float32MultiArray`: **[prediction_time_s, x_m, y_m]** in a single message |
 | `/waypoint` | Legacy controller input; metric policies also publish XY here for visualization |
 | `/topoplan/waypoint_time_s` | `std_msgs/msg/Float32`, metric prediction time for inspection |
-| `/topoplan/r3_stop` | `std_msgs/msg/Bool`, true stops; false is a live enable heartbeat |
+| `/topoplan/goal_relation_stop` | `std_msgs/msg/Bool`, true stops; false is a live enable heartbeat |
 | `/topoplan/reached_goal` | `std_msgs/msg/Bool`, goal status; exploration starts with false |
-| `/topoplan/reset_episode` | `std_msgs/msg/Empty`, R3 episode reset |
-| `/topoplan/r3_status` | `std_msgs/msg/String`, R3 status JSON |
+| `/topoplan/reset_episode` | `std_msgs/msg/Empty`, navigation episode reset |
+| `/topoplan/goal_relation_status` | `std_msgs/msg/String`, subgoal selector status as JSON |
 | `/cmd_vel_mux/input/navi` | `geometry_msgs/msg/Twist`, configurable via `robot.yaml` |
 
 For waypoint index 2 and `action_time_step_s=0.2`, prediction time is **0.6 s**. The metric controller uses the duration in the command itself, then applies speed limits. The separate time topic cannot be mismatched with a command. Invalid commands, a stopped/expired heartbeat, goal arrival and expired waypoints produce zero velocity. A fresh enable and fresh waypoint are required after a stop or timeout.
 
 Control messages are reliable and volatile. Camera subscriptions use best-effort QoS so common sensor publishers can connect. Goal/status/time publishers use transient-local durability; subscribe with matching durability to retrieve their latest state. Enable heartbeats are volatile so restarting a controller cannot replay an old enable signal.
 
-Camera frames need **positive, strictly increasing `header.stamp.sec/nanosec`**. ROS 2 has no `header.seq`. Repeated/zero stamps do not count as new observations or keep the watchdog alive. Publish `/topoplan/reset_episode` before resetting R3 camera timestamps. Context frames use the checkpoint's observation stride and the original frame cadence described in `docs/R3_HABITAT.md`.
+Camera frames need **positive, strictly increasing `header.stamp.sec/nanosec`**. ROS 2 has no `header.seq`. Repeated/zero stamps do not count as new observations or keep the watchdog alive. Publish `/topoplan/reset_episode` before resetting camera timestamps. Context frames use the checkpoint's observation stride and the original frame cadence described in `docs/GOAL_RELATION_HABITAT.md`.
 
 Watchdogs and controller expiry use monotonic wall time and remain effective when `use_sim_time=true` and `/clock` pauses. ROS remaps/parameters work through `--ros-args`; when using the paired wrappers those arguments go to the policy. Configure the controller separately if it needs different remaps.
 
@@ -81,13 +81,4 @@ Habitat closed-loop control still requires a simulator adapter that publishes st
 
 ## Verification
 
-From the repository root, with Humble sourced and both local packages installed:
-
-```bash
-ROS_LOG_DIR=/tmp/visualnav-ros2-logs ROS_DOMAIN_ID=73 python -m unittest discover -s deployment/tests -p 'test_*.py' -v
-(cd train && python -m unittest discover -s tests -p 'test_r3_*.py' -v)
-```
-
-The deployment suite includes real DDS communication with a controller subprocess, checks the metric/legacy topic boundary, and verifies timeout stopping with a paused simulation clock. Run it on a ROS domain separate from your robot's graph.
-
-Local verification on 2026-11-08: **21 R3 training tests and 10 ROS 2 deployment tests passed** using `nomad_train` (Python 3.10) and the installed Humble runtime. The deployment tests include actual small-model checkpoint loading and inference for exploration/navigation with synthetic RGB over DDS, plus image-timeout stopping. Launch argument loading, CLI help and shell syntax also passed. Real camera/base drivers and Habitat closed-loop navigation remain target-platform acceptance work.
+Local verification on 2026-11-08: **21 GOAL_RELATION training tests and 10 ROS 2 deployment tests passed** using `nomad_train` (Python 3.10) and the installed Humble runtime. The deployment tests include actual small-model checkpoint loading and inference for exploration/navigation with synthetic RGB over DDS, plus image-timeout stopping. Launch argument loading, CLI help and shell syntax also passed. Real camera/base drivers and Habitat closed-loop navigation remain target-platform acceptance work.

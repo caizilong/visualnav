@@ -149,7 +149,7 @@ If you want to use our checkpoints, you can download the `*.pth` files from [thi
 
 Deployment uses **ROS 2 Humble and Python 3.10**. See [deployment/README.md](deployment/README.md) for environment setup, navigation/exploration, control topics, optional camera/joystick/mux launch, and ROS 2 bag recording.
 
-The wrapper scripts start the policy and a controller with matching legacy or metric command semantics. Hardware drivers and Habitat's simulator control adapter are supplied by the target platform. R3 training and calibration are documented in [docs/R3_HABITAT.md](docs/R3_HABITAT.md).
+The wrapper scripts start the policy and a controller with matching legacy or metric command semantics. Hardware drivers and Habitat's simulator control adapter are supplied by the target platform. GOAL_RELATION training and calibration are documented in [docs/GOAL_RELATION_HABITAT.md](docs/GOAL_RELATION_HABITAT.md).
 
 ## Citing
 ```

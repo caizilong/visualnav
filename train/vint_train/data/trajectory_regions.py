@@ -1,4 +1,4 @@
-"""R1 target definition and train-only radial statistics; no image/depth inputs."""
+"""SPATIAL_BOTTLENECK target definition and train-only radial statistics; no image/depth inputs."""
 
 import json
 import math
@@ -40,52 +40,52 @@ def metric_visitation_histograms(points, definition):
 
 def validate_definition(definition):
     if not isinstance(definition, dict):
-        raise ValueError("R1 requires fitted discretization; run prepare_r1_data first")
+        raise ValueError("SPATIAL_BOTTLENECK requires fitted discretization; run prepare_trajectory_regions first")
     expected = {"schema_version": 1, "target": TARGET, "distance_unit": "meter",
                 "coordinate_frame": "nomad_xy_ccw", "angular_convention": "uniform_centered_forward_ccw",
                 "radial_boundary_rule": "left_closed_right_open", "waypoint_weighting": "uniform"}
     if any(definition.get(k) != v for k, v in expected.items()):
-        raise ValueError("Unsupported R1 trajectory-region definition")
+        raise ValueError("Unsupported SPATIAL_BOTTLENECK trajectory-region definition")
     result = deepcopy(definition)
     for key in ("num_sectors", "num_radial_bins"):
         if type(result.get(key)) is not int or result[key] < 1:
-            raise ValueError(f"R1 {key} must be a positive integer")
+            raise ValueError(f"SPATIAL_BOTTLENECK {key} must be a positive integer")
     epsilon = result.get("stationary_epsilon_m")
     if type(epsilon) not in (float, int) or not math.isfinite(epsilon) or epsilon < 0:
-        raise ValueError("R1 stationary_epsilon_m must be finite and nonnegative")
+        raise ValueError("SPATIAL_BOTTLENECK stationary_epsilon_m must be finite and nonnegative")
     boundaries = result.get("radial_boundaries_m")
     if (not isinstance(boundaries, list) or len(boundaries) != result["num_radial_bins"] - 1
             or any(type(x) not in (int, float) or not math.isfinite(x) for x in boundaries)
             or any(b <= a for a, b in zip([epsilon] + boundaries, boundaries))):
-        raise ValueError("R1 radial boundaries must be strictly increasing and above stationary_epsilon_m")
+        raise ValueError("SPATIAL_BOTTLENECK radial boundaries must be strictly increasing and above stationary_epsilon_m")
     return result
 
 
 def fit_settings(config):
-    r1 = config.get("r1", {})
-    result = {"num_sectors": r1.get("num_sectors", 6), "num_radial_bins": r1.get("num_radial_bins", 4),
-              "stationary_epsilon_m": r1.get("stationary_epsilon_m", 1.e-4),
+    spatial_bottleneck = config.get("spatial_bottleneck", {})
+    result = {"num_sectors": spatial_bottleneck.get("num_sectors", 6), "num_radial_bins": spatial_bottleneck.get("num_radial_bins", 4),
+              "stationary_epsilon_m": spatial_bottleneck.get("stationary_epsilon_m", 1.e-4),
               "max_goal_distance": config["distance"]["max_dist_cat"],
               "min_action_distance": config["action"]["min_dist_cat"],
               "max_action_distance": config["action"]["max_dist_cat"],
-              "max_fit_points": r1.get("max_fit_points", 200000), "fit_seed": r1.get("fit_seed", 0),
-              "prior_smoothing_mass": r1.get("prior_smoothing_mass", 1.e-4)}
+              "max_fit_points": spatial_bottleneck.get("max_fit_points", 200000), "fit_seed": spatial_bottleneck.get("fit_seed", 0),
+              "prior_smoothing_mass": spatial_bottleneck.get("prior_smoothing_mass", 1.e-4)}
     for key in ("num_sectors", "num_radial_bins", "max_fit_points"):
         if type(result[key]) is not int or result[key] < 1:
-            raise ValueError(f"r1.{key} must be a positive integer")
+            raise ValueError(f"spatial_bottleneck.{key} must be a positive integer")
     for key in ("max_goal_distance", "min_action_distance", "max_action_distance", "fit_seed"):
         if type(result[key]) is not int or result[key] < 0:
-            raise ValueError(f"R1 fitting {key} must be a nonnegative integer")
+            raise ValueError(f"SPATIAL_BOTTLENECK fitting {key} must be a nonnegative integer")
     if result["max_action_distance"] <= result["min_action_distance"] + 1:
-        raise ValueError("R1 needs at least one strictly valid action goal distance")
+        raise ValueError("SPATIAL_BOTTLENECK needs at least one strictly valid action goal distance")
     epsilon = result["stationary_epsilon_m"]
     if type(epsilon) not in (int, float) or not math.isfinite(epsilon) or epsilon < 0:
-        raise ValueError("r1.stationary_epsilon_m must be finite and nonnegative")
+        raise ValueError("spatial_bottleneck.stationary_epsilon_m must be finite and nonnegative")
     if result["max_fit_points"] < result["num_radial_bins"]:
         raise ValueError("max_fit_points must be at least num_radial_bins")
     smooth = result["prior_smoothing_mass"]
     if type(smooth) not in (int, float) or not math.isfinite(smooth) or not 0 < smooth < 1:
-        raise ValueError("r1.prior_smoothing_mass must lie strictly between zero and one")
+        raise ValueError("spatial_bottleneck.prior_smoothing_mass must lie strictly between zero and one")
     return result
 
 
@@ -123,7 +123,7 @@ def fit_visitation_prior(bundle, config, definition, settings):
             weight_sum += float(weights.sum())
             valid_windows += int((weights > 0).sum())
     if weight_sum <= 0:
-        raise ValueError("R1 train prior has no valid action samples")
+        raise ValueError("SPATIAL_BOTTLENECK train prior has no valid action samples")
     smoothing = settings["prior_smoothing_mass"]
     probability = (1 - smoothing) * total / weight_sum + smoothing / total.size
     return {"method": "expected_valid_action_sample_mean_v1", "fit_split": "train",
@@ -137,7 +137,7 @@ def fit_region_statistics(bundle, config):
 
     A bounded, deterministic uniform priority reservoir avoids storing every
     waypoint. Each eligible observation contributes once, irrespective of how
-    often goals or the R3 relation stream sample it. No validation data is read
+    often goals or the GOAL_RELATION relation stream sample it. No validation data is read
     here. Radii are invariant to the existing XY/yaw rotation.
     """
     settings = fit_settings(config)
@@ -172,7 +172,7 @@ def fit_region_statistics(bundle, config):
                 keep = np.argpartition(priorities, limit - 1)[:limit]
                 values, priorities = values[keep], priorities[keep]
     if not len(values):
-        raise ValueError("R1 fitting found no eligible nonstationary train waypoints")
+        raise ValueError("SPATIAL_BOTTLENECK fitting found no eligible nonstationary train waypoints")
     boundaries = np.quantile(values, np.arange(1, settings["num_radial_bins"]) / settings["num_radial_bins"]).tolist()
     definition = validate_definition({"schema_version": 1, "target": TARGET, "distance_unit": "meter",
         "coordinate_frame": "nomad_xy_ccw", "angular_convention": "uniform_centered_forward_ccw",
@@ -192,15 +192,15 @@ def load_region_statistics(path, bundle, config):
         saved = json.load(stream)
     if (saved.get("schema_version") != 2 or saved.get("fit_split") != "train"
             or saved.get("fit_method") != "uniform_priority_reservoir_quantiles_v1"):
-        raise ValueError("Expected R1 statistics schema 2 with a train-only prior; rerun prepare_r1_data")
+        raise ValueError("Expected SPATIAL_BOTTLENECK statistics schema 2 with a train-only prior; rerun prepare_trajectory_regions")
     if saved.get("training_signature") != training_signature(bundle, config["context_size"], config["len_traj_pred"]):
-        raise ValueError("R1 statistics do not match the train trajectories, scale or sampling")
+        raise ValueError("SPATIAL_BOTTLENECK statistics do not match the train trajectories, scale or sampling")
     if saved.get("fit_settings") != fit_settings(config):
-        raise ValueError("R1 statistics fitting settings differ from the training config")
+        raise ValueError("SPATIAL_BOTTLENECK statistics fitting settings differ from the training config")
     definition = validate_definition(saved["definition"])
     for key in ("num_sectors", "num_radial_bins", "stationary_epsilon_m"):
         if definition[key] != saved["fit_settings"][key]:
-            raise ValueError(f"R1 statistics definition disagrees with fitting setting {key}")
+            raise ValueError(f"SPATIAL_BOTTLENECK statistics definition disagrees with fitting setting {key}")
     prior = saved.get("visitation_prior", {})
     probability = np.asarray(prior.get("probability_flat", []), dtype=np.float64)
     if (prior.get("method") != "expected_valid_action_sample_mean_v1" or prior.get("fit_split") != "train"
@@ -208,5 +208,5 @@ def load_region_statistics(path, bundle, config):
             or probability.shape != (definition["num_sectors"] * definition["num_radial_bins"],)
             or not np.isfinite(probability).all() or np.any(probability <= 0)
             or not np.isclose(probability.sum(), 1., rtol=0, atol=1.e-10)):
-        raise ValueError("Invalid R1 train-only visitation prior; rerun prepare_r1_data")
+        raise ValueError("Invalid SPATIAL_BOTTLENECK train-only visitation prior; rerun prepare_trajectory_regions")
     return definition, digest_json(saved), saved

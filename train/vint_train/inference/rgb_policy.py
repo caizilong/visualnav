@@ -15,18 +15,18 @@ def make_noise_scheduler(config):
 
 @torch.no_grad()
 def predict_rgb_visitation(model, obs_images, goal_images=None, goal_mask=None):
-    """Optional R1 diagnostic: expected waypoint visitation, NOT occupancy.
+    """Optional SPATIAL_BOTTLENECK diagnostic: expected waypoint visitation, NOT occupancy.
 
     No goal image means goal-free mode. Use an eval-mode model. The auxiliary
-    head is not called by normal navigation and never replaces R3 selection.
+    head is not called by normal navigation and never replaces GOAL_RELATION selection.
     The global_auxiliary control returns spatial_tokens=None; other modes
     return the query tokens or fixed-pooling spatial slots.
     """
-    r1 = model._model_config.get("r1", {})
-    if not r1.get("enabled") or not r1.get("visitation_head_trained"):
-        raise ValueError("Visitation prediction requires a supervised R1 checkpoint")
+    spatial_bottleneck = model._model_config.get("spatial_bottleneck", {})
+    if not spatial_bottleneck.get("enabled") or not spatial_bottleneck.get("visitation_head_trained"):
+        raise ValueError("Visitation prediction requires a supervised SPATIAL_BOTTLENECK checkpoint")
     if model.training:
-        raise ValueError("Call model.eval() before R1 diagnostics")
+        raise ValueError("Call model.eval() before SPATIAL_BOTTLENECK diagnostics")
     if goal_images is None:
         if goal_mask is not None and (goal_mask != 1).any():
             raise ValueError("No goal image requires goal_mask=1")
@@ -35,7 +35,7 @@ def predict_rgb_visitation(model, obs_images, goal_images=None, goal_mask=None):
     elif goal_mask is None:
         goal_mask = torch.zeros(len(obs_images), dtype=torch.long, device=obs_images.device)
     result = model("vision_encoder", obs_img=normalize_rgb(obs_images),
-                   goal_img=normalize_rgb(goal_images), input_goal_mask=goal_mask, return_r1=True)
+                   goal_img=normalize_rgb(goal_images), input_goal_mask=goal_mask, return_visitation=True)
     logits = result["visitation_logits"]
     result["visitation_probability"] = logits.float().flatten(1).softmax(dim=-1).reshape_as(logits)
     return result

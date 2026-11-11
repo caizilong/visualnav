@@ -1,4 +1,4 @@
-"""Paired scratch-experiment initialization, random streams and gradient probes."""
+"""Paired scratch-experiment initialization, and random streams."""
 
 import copy
 import hashlib
@@ -37,7 +37,7 @@ class DiffusionStreams:
 
 @contextmanager
 def branch_rng(seed, device):
-    """Keep R3 dropout and stochastic depth out of the next action forward."""
+    """Keep GOAL_RELATION dropout and stochastic depth out of the next action forward."""
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=devices):
         torch.set_rng_state(torch.Generator().manual_seed(seed).get_state())
@@ -54,8 +54,8 @@ def audit_scratch_initialization(model, config):
     optimizer state nor weights from another experiment are loaded.
     """
     reference_config = copy.deepcopy(config)
-    reference_config.setdefault("r1", {})["enabled"] = False
-    reference_config.setdefault("r3", {})["enabled"] = False
+    reference_config.setdefault("spatial_bottleneck", {})["enabled"] = False
+    reference_config.setdefault("goal_relation", {})["enabled"] = False
     with torch.random.fork_rng(devices=[]):
         torch.set_rng_state(torch.Generator().manual_seed(config["seed"]).get_state())
         reference = build_model(reference_config)
@@ -65,46 +65,7 @@ def audit_scratch_initialization(model, config):
         raise ValueError("Scratch common initialization differs from the same-seed NoMaD baseline")
     return {"initialization": "scratch", "common_initialization_verified": True,
             "initial_common_weights_sha256": actual, "reference_common_weights_sha256": expected,
-            "initial_r1_weights_sha256": (weights_sha256(model.vision_encoder.spatial_bottleneck)
+            "initial_spatial_bottleneck_weights_sha256": (weights_sha256(model.vision_encoder.spatial_bottleneck)
                                           if hasattr(model.vision_encoder, "spatial_bottleneck") else None),
-            "initial_r3_weights_sha256": (weights_sha256(model.goal_relation_head)
+            "initial_goal_relation_weights_sha256": (weights_sha256(model.goal_relation_head)
                                           if hasattr(model, "goal_relation_head") else None)}
-
-
-def gradient_probe(loss, model):
-    """Separate shared, direct spatial and feedback routes; None means unused."""
-    if loss is None:
-        return None
-    named = dict(model.named_parameters())
-    last_layer = len(model.vision_encoder.sa_encoder.layers) - 1
-    names = ["vision_encoder.obs_encoder._conv_head.weight", "vision_encoder.goal_encoder._conv_head.weight",
-             "vision_encoder.compress_obs_enc.weight", f"vision_encoder.sa_encoder.layers.{last_layer}.linear2.weight",
-             "vision_encoder.spatial_bottleneck.spatial_projection.weight",
-             "vision_encoder.spatial_bottleneck.queries",
-             "vision_encoder.spatial_bottleneck.residual_projection.weight"]
-    spatial = getattr(model.vision_encoder, "spatial_bottleneck", None)
-    if spatial is not None:
-        names.append(f"vision_encoder.spatial_bottleneck.visitation_head.{len(spatial.visitation_head)-1}.weight")
-    names = [name for name in names if name in named]
-    gradients = torch.autograd.grad(loss, [named[name] for name in names], retain_graph=True, allow_unused=True)
-    return {name: (None if value is None else value.detach().float().flatten().cpu())
-            for name, value in zip(names, gradients)}
-
-
-def gradient_report(probes):
-    names = sorted({name for probe in probes.values() if probe is not None for name in probe})
-    result = {"scope": "weighted losses; first microbatch only; before scaler and clipping", "parameters": {}}
-    for name in names:
-        values = {task: probe.get(name) if probe is not None else None for task, probe in probes.items()}
-        record = {task: {"loss_available": probes[task] is not None, "connected": value is not None,
-                         "norm": float(value.norm()) if value is not None else None,
-                         "finite": bool(torch.isfinite(value).all()) if value is not None else None}
-                  for task, value in values.items()}
-        record["cosines"] = {}
-        for left, right in (("nomad", "visitation"), ("nomad", "r3"), ("visitation", "r3")):
-            a, b = values.get(left), values.get(right)
-            comparable = (a is not None and b is not None and torch.isfinite(a).all()
-                          and torch.isfinite(b).all() and a.norm() > 0 and b.norm() > 0)
-            record["cosines"][left + "/" + right] = float(torch.nn.functional.cosine_similarity(a[None], b[None])) if comparable else None
-        result["parameters"][name] = record
-    return result

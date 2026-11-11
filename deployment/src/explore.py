@@ -41,7 +41,7 @@ def main(args):
     duration = (args.waypoint + 1) * canonical["action_time_step_s"] if metric else None
     sampling = dict(canonical, action_scale_m=canonical.get("action_scale_m", 1.))
     robot = robot_config()
-    timeout = config.get("r3", {}).get("runtime", {}).get("stale_timeout_s", 2.)
+    timeout = config.get("goal_relation", {}).get("runtime", {}).get("stale_timeout_s", 2.)
     observations = ObservationBuffer(config["context_size"], canonical.get("observation_stride", 1), timeout)
     control_lock = threading.RLock()
     enabled = False

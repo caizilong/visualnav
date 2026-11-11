@@ -31,11 +31,11 @@ def validate_checkpoint_config(model, checkpoint):
         return
     if not isinstance(saved, Mapping):
         raise ValueError("Checkpoint model_config must be a mapping")
-    # Before the control variants existed, enabled R1 always meant query tokens.
+    # Before the control variants existed, enabled SPATIAL_BOTTLENECK always meant query tokens.
     # Keep those inference checkpoints readable without relaxing any other check.
     saved = deepcopy(saved)
-    if saved.get("r1", {}).get("enabled"):
-        saved["r1"].setdefault("representation", "query_tokens")
+    if saved.get("spatial_bottleneck", {}).get("enabled"):
+        saved["spatial_bottleneck"].setdefault("representation", "query_tokens")
     expected = model_config(model)
     if expected is None:
         raise ValueError("Cannot validate checkpoint configuration: construct the model with build_model")

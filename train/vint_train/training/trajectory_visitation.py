@@ -16,20 +16,20 @@ def visitation_targets(batch, config, device=None):
     other action-invalid samples. Repeated nonstationary points retain their
     time weight. Unknown, occupied and free are not target classes.
     """
-    definition = config["r1"]["discretization"]
+    definition = config["spatial_bottleneck"]["discretization"]
     actions = batch[2].detach().to(device="cpu", dtype=torch.float64)
     selected = batch[6].detach().to(device="cpu") > 0
     if actions.ndim != 3 or actions.shape[-1] != 2 or selected.shape != (len(actions),):
-        raise ValueError("R1 expects XY action targets [B,H,2] and action_mask [B]")
+        raise ValueError("SPATIAL_BOTTLENECK expects XY action targets [B,H,2] and action_mask [B]")
     if not torch.isfinite(actions[selected]).all():
-        raise ValueError("R1 valid action targets must be finite")
+        raise ValueError("SPATIAL_BOTTLENECK valid action targets must be finite")
     scale = float(config["action_scale_m"])
     if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("R1 action_scale_m must be finite and positive")
+        raise ValueError("SPATIAL_BOTTLENECK action_scale_m must be finite and positive")
     # This trainer supplies a single manifest scale and dataset_index=0. Fail
     # instead of silently applying that scale to a heterogeneous dataset batch.
     if batch[5] is not None and (batch[5] != 0).any():
-        raise ValueError("R1 expects the single-manifest dataset_index=0 scale contract")
+        raise ValueError("SPATIAL_BOTTLENECK expects the single-manifest dataset_index=0 scale contract")
     points = torch.where(selected[:, None, None], actions, torch.zeros_like(actions)) * scale
     histogram, counts = metric_visitation_histograms(points.numpy(), definition)
     target, count = torch.from_numpy(histogram).float(), torch.from_numpy(counts)
@@ -41,7 +41,7 @@ def visitation_targets(batch, config, device=None):
 
 def visitation_loss_sum(logits, target, valid):
     if logits.shape != target.shape:
-        raise ValueError("R1 visitation logits and targets must have the same [B,S,R] shape")
+        raise ValueError("SPATIAL_BOTTLENECK visitation logits and targets must have the same [B,S,R] shape")
     if not valid.any():
         return logits.new_zeros((), dtype=torch.float32)
     log_probability = F.log_softmax(logits[valid].float().flatten(1), dim=-1)
@@ -112,7 +112,7 @@ class VisitationMetrics:
         logits = module.predict_visitation(tokens, condition)
         self.paired_original.update(encoded["visitation_logits"][valid], target[valid], paired_valid, counts[valid])
         self.permuted.update(logits, target[valid], paired_valid, counts[valid])
-        if model.vision_encoder.r1_mode == "bottleneck":
+        if model.vision_encoder.spatial_bottleneck_mode == "bottleneck":
             difference = (module.fuse(condition, tokens) - encoded["condition"][valid]).float().norm(dim=-1)
             finite = torch.isfinite(difference)
             self.condition_samples += int(finite.sum())

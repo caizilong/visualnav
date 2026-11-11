@@ -1,7 +1,9 @@
 train/logs/*
 train/datasets/*
 /datasets/
-/docs/
+/docs/*
+!/docs/SPATIAL_BOTTLENECK_*.md
+!/docs/GOAL_RELATION_*.md
 train/vint_train/data/data_splits/*
 train/wandb/*
 train/gnm_dataset/*

@@ -122,3 +122,67 @@ pairwise_test_freq: 0 # in epochs
 eval_fraction: 0.25
 wandb_log_freq: 10 # in iterations
 eval_freq: 1 # in epochs
+
+# With both modules disabled, use the datasets and training settings above.
+# Set training_profile: habitat_scratch to train the Habitat baseline with both disabled.
+# Enabling either module or passing a Habitat ablation flag selects habitat_scratch.
+habitat_training:
+  initialization: scratch
+  project_name: nomad_habitat
+  run_name: scratch
+  datasets: {}
+  scheduler: linear_warmup_cosine
+  num_workers: 4
+  weight_decay: 0.01
+  batch_size: 4
+  relation_batch_size: 4
+  eval_batch_size: 4
+  gradient_accumulation_steps: 4
+  amp: true
+  activation_checkpointing: false
+  print_log_freq: 50
+  checkpoint_every: 10
+  eval_sampling_batches: 1
+  eval_action_samples: 4
+  eval_fraction: 1.0
+
+simulation:
+  manifest: ../datasets/habitat/manifest.json
+  action_statistics: ../datasets/habitat/action_stats.json
+  trajectory_region_statistics: ../datasets/habitat/trajectory_region_statistics.json
+  # cache_dir: /data/habitat/nomad_cache
+
+spatial_bottleneck:
+  enabled: false
+  mode: bottleneck  # auxiliary removes feedback, but keeps the same auxiliary task.
+  representation: query_tokens  # CLI also provides global_condition / pooled_spatial controls.
+  fusion: shared
+  num_sectors: 6
+  num_radial_bins: 4
+  token_dim: 64
+  num_attention_heads: 4
+  lambda_visitation: 0.1  # Initial weight; tune only using train/validation data.
+  stationary_epsilon_m: 0.0001  # Numerical dead zone for undefined bearings.
+  max_fit_points: 200000
+  fit_seed: 0  # Shared across training seeds, so spatial bins remain identical.
+  prior_smoothing_mass: 0.0001  # Fixed before validation; prevents log(0) for unseen bins.
+  # discretization and its statistics fingerprint are loaded from trajectory_region_statistics.
+
+goal_relation:
+  enabled: false
+  hidden_dims: [128, 64]
+  lambda_reach: 1.0
+  lambda_distance: 1.0
+  lambda_start: 0.1
+  lambda_end: 1.0
+  warmup_steps: 500
+  distance_beta: 0.1
+  selector:
+    max_forward_skip: 2
+    use_distance: true
+    close_threshold: 3.0
+    radius: 4
+  runtime:
+    max_rejections: 3
+    rejection_timeout_s: 2.0
+    stale_timeout_s: 2.0

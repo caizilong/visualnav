@@ -1,4 +1,4 @@
-"""R1 spatial tokens supervised by the existing demonstration waypoints.
+"""SPATIAL_BOTTLENECK spatial tokens supervised by the existing demonstration waypoints.
 
 Tokens depend only on current RGB features. The auxiliary distribution depends
 on tokens and the goal-masked condition, and describes demonstration visitation,
@@ -11,10 +11,10 @@ from torch.nn import functional as F
 import math
 
 
-def resolve_r1_config(config):
+def resolve_spatial_bottleneck_config(config):
     """Canonical architecture settings, including shape-invisible ablations."""
     if type(config.get("enabled", False)) is not bool:
-        raise ValueError("r1.enabled must be a boolean")
+        raise ValueError("spatial_bottleneck.enabled must be a boolean")
     if not config.get("enabled", False):
         return None
     resolved = {"enabled": True}
@@ -22,19 +22,19 @@ def resolve_r1_config(config):
                          ("token_dim", 64), ("num_attention_heads", 4)):
         value = config.get(key, default)
         if type(value) is not int or value < 1:
-            raise ValueError(f"r1.{key} must be a positive integer")
+            raise ValueError(f"spatial_bottleneck.{key} must be a positive integer")
         resolved[key] = value
     if resolved["token_dim"] % resolved["num_attention_heads"]:
-        raise ValueError("r1.token_dim must be divisible by num_attention_heads")
+        raise ValueError("spatial_bottleneck.token_dim must be divisible by num_attention_heads")
     mode = config.get("mode", "bottleneck")
     if mode not in ("bottleneck", "auxiliary"):
-        raise ValueError("r1.mode must be bottleneck or auxiliary")
+        raise ValueError("spatial_bottleneck.mode must be bottleneck or auxiliary")
     if config.get("fusion", "shared") != "shared":
-        raise ValueError("R1 uses a shared condition for temporal, R3 and diffusion heads")
+        raise ValueError("SPATIAL_BOTTLENECK uses a shared condition for temporal, GOAL_RELATION and diffusion heads")
     resolved.update(mode=mode, fusion="shared")
     representation = config.get("representation", "query_tokens")
     if representation not in ("query_tokens", "pooled_spatial", "global_condition"):
-        raise ValueError("r1.representation must be query_tokens, pooled_spatial or global_condition")
+        raise ValueError("spatial_bottleneck.representation must be query_tokens, pooled_spatial or global_condition")
     if representation == "global_condition" and mode != "auxiliary":
         raise ValueError("The global-condition control is auxiliary-only")
     resolved["representation"] = representation
@@ -42,10 +42,10 @@ def resolve_r1_config(config):
     resolved["discretization"] = validate_definition(config.get("discretization"))
     for key in ("num_sectors", "num_radial_bins"):
         if resolved[key] != resolved["discretization"][key]:
-            raise ValueError(f"R1 model and trajectory discretization disagree on {key}")
+            raise ValueError(f"SPATIAL_BOTTLENECK model and trajectory discretization disagree on {key}")
     trained = config.get("visitation_head_trained", True)
     if type(trained) is not bool:
-        raise ValueError("r1.visitation_head_trained must be a boolean")
+        raise ValueError("spatial_bottleneck.visitation_head_trained must be a boolean")
     resolved["visitation_head_trained"] = trained
     return resolved
 
@@ -111,7 +111,7 @@ class SpatialBottleneck(nn.Module):
     def encode(self, spatial_features):
         """[B,C,Hf,Wf] -> [B,sectors,token_dim], using current-frame RGB only."""
         if spatial_features.ndim != 4:
-            raise ValueError("R1 spatial features must have shape [B,C,H,W]")
+            raise ValueError("SPATIAL_BOTTLENECK spatial features must have shape [B,C,H,W]")
         projected = self.spatial_projection(spatial_features)
         batch, _, height, width = projected.shape
         x = (torch.arange(width, device=projected.device, dtype=projected.dtype) + .5) * (2.0 / width) - 1

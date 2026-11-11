@@ -5,7 +5,6 @@ import numpy as np
 import yaml
 import time
 import random
-import pdb
 
 import torch
 import torch.nn as nn
@@ -33,9 +32,9 @@ def main(config):
     if config.get("training_profile") == "habitat_scratch":
         from vint_train.training.simulation_train import run_habitat_scratch
         return run_habitat_scratch(config)
-    if config.get("r1", {}).get("enabled", False):
-        raise ValueError("R1 requires the Habitat trajectory-visitation trainer; "
-                         "the legacy training loop does not implement its loss")
+    if any(config.get(module, {}).get("enabled", False)
+           for module in ("spatial_bottleneck", "goal_relation")):
+        raise ValueError("The spatial bottleneck and goal relation modules require habitat_scratch")
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
 
@@ -307,10 +306,12 @@ if __name__ == "__main__":
         help="Path to the config file in train_config folder",
     )
     parser.add_argument("--ablation", choices=("baseline", "r_only", "r_d"),
-                        help="Habitat R3 control; combine with --r1-mode for R1 experiments")
-    parser.add_argument("--r1-mode", choices=("off", "bottleneck", "auxiliary", "tokens_only",
+                        help="Select the Habitat goal relation variant (baseline, reachability only, "
+                             "or reachability with path length)")
+    parser.add_argument("--spatial-bottleneck-mode", choices=("off", "bottleneck", "auxiliary", "tokens_only",
                                              "global_auxiliary", "pooled_auxiliary", "pooled_bottleneck"),
-                        help="R1 feedback/supervision ablations plus global and fixed-pooling controls")
+                        help="Select the trajectory-guided spatial bottleneck or a control for its "
+                             "representation, supervision, or feedback")
     parser.add_argument("--resume", help="Resume a matching full v2 scratch checkpoint at its next epoch")
     args = parser.parse_args()
 
@@ -324,29 +325,39 @@ if __name__ == "__main__":
 
     config.update(user_config)
 
-    if args.ablation or args.resume or args.r1_mode:
+    habitat_settings = config.pop("habitat_training", None)
+    if habitat_settings is not None and (
+        config.get("training_profile") == "habitat_scratch"
+        or args.ablation or args.spatial_bottleneck_mode or args.resume
+        or any(config.get(module, {}).get("enabled", False)
+               for module in ("spatial_bottleneck", "goal_relation"))
+    ):
+        config.update(habitat_settings)
+        config["training_profile"] = "habitat_scratch"
+
+    if args.ablation or args.resume or args.spatial_bottleneck_mode:
         if config.get("training_profile") != "habitat_scratch":
-            parser.error("--ablation, --r1-mode and --resume require training_profile: habitat_scratch")
+            parser.error("--ablation, --spatial-bottleneck-mode and --resume require training_profile: habitat_scratch")
     if args.ablation:
-        relation = config.setdefault("r3", {})
+        relation = config.setdefault("goal_relation", {})
         relation["enabled"] = args.ablation != "baseline"
         relation["lambda_distance"] = 1. if args.ablation == "r_d" else 0.
         relation.setdefault("selector", {})["use_distance"] = args.ablation == "r_d"
         config["run_name"] += "_" + args.ablation
-    if args.r1_mode:
-        spatial = config.setdefault("r1", {})
-        spatial["enabled"] = args.r1_mode != "off"
-        if args.r1_mode != "off":
-            spatial["mode"] = "auxiliary" if args.r1_mode.endswith("auxiliary") else "bottleneck"
-            spatial["representation"] = ("global_condition" if args.r1_mode == "global_auxiliary" else
-                                         "pooled_spatial" if args.r1_mode.startswith("pooled_") else "query_tokens")
-            if args.r1_mode == "tokens_only":
+    if args.spatial_bottleneck_mode:
+        spatial = config.setdefault("spatial_bottleneck", {})
+        spatial["enabled"] = args.spatial_bottleneck_mode != "off"
+        if args.spatial_bottleneck_mode != "off":
+            spatial["mode"] = "auxiliary" if args.spatial_bottleneck_mode.endswith("auxiliary") else "bottleneck"
+            spatial["representation"] = ("global_condition" if args.spatial_bottleneck_mode == "global_auxiliary" else
+                                         "pooled_spatial" if args.spatial_bottleneck_mode.startswith("pooled_") else "query_tokens")
+            if args.spatial_bottleneck_mode == "tokens_only":
                 spatial["lambda_visitation"] = 0.
             else:
                 spatial.setdefault("lambda_visitation", .1)
                 if float(spatial["lambda_visitation"]) <= 0:
-                    parser.error("Supervised R1 modes require a positive r1.lambda_visitation")
-        config["run_name"] += "_r1_" + args.r1_mode
+                    parser.error("Supervised spatial bottleneck modes require a positive spatial_bottleneck.lambda_visitation")
+        config["run_name"] += "_spatial_bottleneck_" + args.spatial_bottleneck_mode
     if args.resume:
         config["resume_from"] = args.resume
 

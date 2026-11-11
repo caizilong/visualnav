@@ -8,12 +8,12 @@ from pathlib import Path
 
 def common_spec(provenance):
     spec = copy.deepcopy(provenance["training_spec"])
-    spec.pop("r1", None)
-    spec.pop("r3", None)
+    spec.pop("spatial_bottleneck", None)
+    spec.pop("goal_relation", None)
     spec["normalization"] = spec["normalization"].replace("; visitation_valid_sample_count", "")
     model = copy.deepcopy(provenance.get("model_config", {}))
-    model.pop("r1", None)
-    model.pop("r3", None)
+    model.pop("spatial_bottleneck", None)
+    model.pop("goal_relation", None)
     return {"training": spec, "model": model, "data": provenance["data_fingerprint"],
             "initial_common_weights": provenance["initial_common_weights_sha256"]}
 
@@ -21,8 +21,8 @@ def common_spec(provenance):
 def compare_runs(folders):
     records, differences = [], []
     reference = None
-    r1_reference = r3_reference = None
-    r1_dimensions = None
+    spatial_bottleneck_reference = goal_relation_reference = None
+    spatial_bottleneck_dimensions = None
     supervised_coefficient = None
     initial_extensions = {}
     for folder in map(Path, folders):
@@ -36,32 +36,32 @@ def compare_runs(folders):
         for key in common:
             if common[key] != reference[key]:
                 differences.append({"run": str(folder), "field": key})
-        r1, r3 = spec.get("r1", {}), spec.get("r3", {})
-        # Common supervised R1 target/weight settings must match even across
+        spatial_bottleneck, goal_relation = spec.get("spatial_bottleneck", {}), spec.get("goal_relation", {})
+        # Common supervised SPATIAL_BOTTLENECK target/weight settings must match even across
         # query/global/pooled controls. tokens_only intentionally has no CE.
-        if r1.get("enabled"):
-            dimensions = {k: provenance.get("model_config", {}).get("r1", {}).get(k)
+        if spatial_bottleneck.get("enabled"):
+            dimensions = {k: provenance.get("model_config", {}).get("spatial_bottleneck", {}).get(k)
                           for k in ("num_sectors", "num_radial_bins", "token_dim", "num_attention_heads", "fusion")}
-            if r1_dimensions is None:
-                r1_dimensions = dimensions
-            if dimensions != r1_dimensions:
-                differences.append({"run": str(folder), "field": "R1 common dimensions/fusion"})
-            target_settings = {k: r1.get(k) for k in ("discretization", "statistics_sha256", "prior_probability")}
-            if r1_reference is None:
-                r1_reference = target_settings
-            if target_settings != r1_reference:
-                differences.append({"run": str(folder), "field": "R1 target/statistics"})
-            if r1.get("lambda_visitation", 0) > 0:
+            if spatial_bottleneck_dimensions is None:
+                spatial_bottleneck_dimensions = dimensions
+            if dimensions != spatial_bottleneck_dimensions:
+                differences.append({"run": str(folder), "field": "SPATIAL_BOTTLENECK common dimensions/fusion"})
+            target_settings = {k: spatial_bottleneck.get(k) for k in ("discretization", "statistics_sha256", "prior_probability")}
+            if spatial_bottleneck_reference is None:
+                spatial_bottleneck_reference = target_settings
+            if target_settings != spatial_bottleneck_reference:
+                differences.append({"run": str(folder), "field": "SPATIAL_BOTTLENECK target/statistics"})
+            if spatial_bottleneck.get("lambda_visitation", 0) > 0:
                 if supervised_coefficient is None:
-                    supervised_coefficient = r1["lambda_visitation"]
-                if r1["lambda_visitation"] != supervised_coefficient:
-                    differences.append({"run": str(folder), "field": "R1 supervised loss weight"})
-        if r3.get("enabled"):
-            if r3_reference is None:
-                r3_reference = r3
-            if r3 != r3_reference:
-                differences.append({"run": str(folder), "field": "R3 supervision/selector"})
-        for extension in ("r1", "r3"):
+                    supervised_coefficient = spatial_bottleneck["lambda_visitation"]
+                if spatial_bottleneck["lambda_visitation"] != supervised_coefficient:
+                    differences.append({"run": str(folder), "field": "SPATIAL_BOTTLENECK supervised loss weight"})
+        if goal_relation.get("enabled"):
+            if goal_relation_reference is None:
+                goal_relation_reference = goal_relation
+            if goal_relation != goal_relation_reference:
+                differences.append({"run": str(folder), "field": "GOAL_RELATION supervision/selector"})
+        for extension in ("spatial_bottleneck", "goal_relation"):
             architecture = copy.deepcopy(provenance.get("model_config", {}).get(extension, {}))
             if architecture.get("enabled"):
                 architecture.pop("mode", None)
@@ -81,8 +81,8 @@ def compare_runs(folders):
         totals = {key: sum(m["train"][key] for m in metrics) if metrics and all(key in m["train"] for m in metrics) else None
                   for key in fields}
         complete = (epochs == list(range(spec["epochs"])) and all(totals[key] is not None for key in fields))
-        records.append({"run": str(folder), "r1": {k: r1.get(k) for k in ("enabled", "mode", "representation", "lambda_visitation")},
-                        "r3_enabled": r3.get("enabled", False), "epochs_logged": epochs,
+        records.append({"run": str(folder), "spatial_bottleneck": {k: spatial_bottleneck.get(k) for k in ("enabled", "mode", "representation", "lambda_visitation")},
+                        "goal_relation_enabled": goal_relation.get("enabled", False), "epochs_logged": epochs,
                         "full_epoch_coverage": complete, "budget": totals,
                         "parameter_counts": provenance.get("parameter_counts"),
                         "peak_cuda_allocated_bytes": max((m["train"].get("peak_cuda_allocated_bytes") or 0 for m in metrics), default=0) or None})
@@ -95,7 +95,7 @@ def compare_runs(folders):
             "consumed_action_budgets_match": matched(action_keys), "successful_update_budgets_match": matched(update_keys),
             "runs": records,
             "scope": "Compare paired runs of one seed. Partial/resumed-only logs cannot certify full budgets. "
-                     "R3 extra labels, parameter counts and time are reported separately. "
+                     "GOAL_RELATION extra labels, parameter counts and time are reported separately. "
                      "This audit does not establish navigation improvements or equal compute."}
 
 

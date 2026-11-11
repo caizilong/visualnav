@@ -1,12 +1,21 @@
 ### 训练
 
-R1 按 **RGB + 现有轨迹访问分布监督**接入，无需新增深度或占据标签。
-配置为 `config/nomad_r1_r3_habitat.yaml`，数据准备、四组主实验与消融见
-[R1 修改计划与使用说明](../docs/R1_IMPLEMENTATION_PLAN.md)。新增对照、初始化/随机流校验、schema 2 统计和校准要求见 [R1 审查修复报告](../docs/R1_REVIEW_FIX_REPORT.md)。本轮尚未运行测试或训练。
+在 [nomad.yaml](config/nomad.yaml) 中设置两个独立的开关：
 
-Habitat 从零训练的 NoMaD / R-only / R+D 使用独立入口配置，见
-[R3 数据、训练、校准和 Ubuntu 验收说明](../docs/R3_HABITAT.md)。
-入口配置是 `config/nomad_r3_habitat.yaml`，不要用下面的旧训练脚本启动 R3。
+```yaml
+spatial_bottleneck:
+  enabled: false
+goal_relation:
+  enabled: false
+```
+
+直接编辑现有配置块里的 enabled 字段。默认都关闭时，使用原 NoMaD 训练数据和参数。打开任一模块后自动使用 Habitat 数据和 habitat_training 参数。两者都关闭时，可以在 YAML 顶层设置 training_profile: habitat_scratch，或传入 --ablation baseline，以训练 Habitat 上的 NoMaD 对照。
+
+--spatial-bottleneck-mode 和 --ablation 分别覆盖对应模块的 YAML 选择。数据准备和消融命令见[空间瓶颈使用说明](../docs/SPATIAL_BOTTLENECK_IMPLEMENTATION_PLAN.md)及[目标关系训练与校准说明](../docs/GOAL_RELATION_HABITAT.md)。
+
+已有扩展 checkpoint 的配置、训练状态和校准文件含旧模块名。使用新入口前需迁移元数据，并用对应模型重新校准。若要精确续训旧实验，请使用保存该 checkpoint 时的代码版本。外部 ROS 2 节点若订阅停止或状态信号，请同步更新话题名，见[部署说明](../deployment/README.md)。
+
+下方脚本用于基础训练。
 
 ```
 cd train

@@ -30,7 +30,7 @@ def main(args):
         raise ValueError("Invalid waypoint index, sample count or radius")
     model = load_model(paths["ckpt_path"], config, device, use_ema=paths.get("use_ema", True))
     if "action_scale_m" in model._model_config:
-        from r3_navigate import run_navigation
+        from goal_relation_navigate import run_navigation
         return run_navigation(args, model, config, TOPOMAP_IMAGES_DIR, device)
     with ROS2Runtime("navigation") as ros:
         return run_legacy(args, model, config, ros)
@@ -110,13 +110,13 @@ def build_parser():
     parser.add_argument("--dir", "-d", default="topomap", help="Topomap name or absolute image directory")
     parser.add_argument("--goal-node", "-g", type=int, default=-1, help="Final topomap node; -1 means the last node")
     parser.add_argument("--close-threshold", "-t", type=nonnegative_float, default=3.0,
-                        help="Temporal distance threshold; must match R3 calibration settings")
+                        help="Temporal distance threshold; must match GOAL_RELATION calibration settings")
     parser.add_argument("--radius", "-r", type=int, default=4)
     parser.add_argument("--num-samples", "-n", type=int, default=8)
-    parser.add_argument("--calibration", help="R3 calibration JSON matching these weights")
-    parser.add_argument("--allow-uncalibrated", action="store_true", help="Explicit R3 debugging mode")
+    parser.add_argument("--calibration", help="GOAL_RELATION calibration JSON matching these weights")
+    parser.add_argument("--allow-uncalibrated", action="store_true", help="Explicit GOAL_RELATION debugging mode")
     parser.add_argument("--route-config", help="Optional required_nodes / broken_after JSON")
-    parser.add_argument("--decision-log", default=str(DEPLOYMENT_ROOT / "logs" / "r3_decisions.jsonl"))
+    parser.add_argument("--decision-log", default=str(DEPLOYMENT_ROOT / "logs" / "goal_relation_decisions.jsonl"))
     return parser
 
 

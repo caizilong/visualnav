@@ -1,4 +1,4 @@
-"""Fit R3 on two held-out splits, or evaluate a fixed artifact on test data."""
+"""Fit GOAL_RELATION on two held-out splits, or evaluate a fixed artifact on test data."""
 
 import argparse
 from collections import defaultdict
@@ -136,16 +136,16 @@ def main():
     if saved.get("format_version") != 2 or "inference_config" not in saved:
         raise ValueError("Calibration requires a complete v2 simulation checkpoint")
     config = saved["inference_config"]
-    if not config.get("r3", {}).get("enabled"):
-        raise ValueError("This model has no R3 head")
+    if not config.get("goal_relation", {}).get("enabled"):
+        raise ValueError("This model has no GOAL_RELATION head")
     bundle = load_manifest(args.manifest, config["context_size"])
-    if bundle["manifest"]["label_definition"] != config["r3"]["label_definition"]:
+    if bundle["manifest"]["label_definition"] != config["goal_relation"]["label_definition"]:
         raise ValueError("Calibration labels do not match the trained model")
     if bundle["fingerprint"] != saved["data_fingerprint"]:
         raise ValueError("The dataset/split fingerprint changed since training")
     model = load_model(args.checkpoint, config, torch.device(args.device), use_ema=args.weights == "ema")
     settings = selector_spec(config)
-    distance_head_trained = config.get("r3", {}).get("lambda_distance", 1.) > 0
+    distance_head_trained = config.get("goal_relation", {}).get("lambda_distance", 1.) > 0
     def collect(split):
         rows = bundle["relations"][split]
         if not rows:
@@ -174,7 +174,7 @@ def main():
             threshold, _ = choose_threshold(p[valid], np.asarray(predictions["target"])[valid], args.max_fdr, args.min_accepted)
             output = {"schema_version": 2, "status": "calibrated", "temperature": temperature,
                       "threshold": threshold, **calibration_binding(model, config),
-                      "label_definition": config["r3"]["label_definition"],
+                      "label_definition": config["goal_relation"]["label_definition"],
                       "data_fingerprint": bundle["fingerprint"], "max_empirical_fdr": args.max_fdr,
                       "min_accepted": args.min_accepted,
                       "temperature_fit_count": int(np.asarray(temp["reach_valid"]).sum()),

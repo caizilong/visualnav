@@ -13,7 +13,7 @@ WAYPOINT_TOPIC = "/waypoint"
 # Kept separate from legacy /waypoint, whose coordinates use another scale.
 METRIC_WAYPOINT_TOPIC = "/topoplan/metric_waypoint"
 WAYPOINT_TIME_TOPIC = "/topoplan/waypoint_time_s"
-STOP_TOPIC = "/topoplan/r3_stop"
+STOP_TOPIC = "/topoplan/goal_relation_stop"
 REVERSE_MODE_TOPIC = "/reverse_mode"
 SAMPLED_OUTPUTS_TOPIC = "/sampled_outputs"
 REACHED_GOAL_TOPIC = "/topoplan/reached_goal"

@@ -1,4 +1,4 @@
-"""Habitat scratch NoMaD/R1/R3; R1 reuses targets in the action stream."""
+"""Habitat scratch NoMaD/SPATIAL_BOTTLENECK/GOAL_RELATION; SPATIAL_BOTTLENECK reuses targets in the action stream."""
 
 import copy
 import itertools
@@ -28,7 +28,7 @@ from .goal_relation_train import (action_loss_sums, relation_loss_sums, relation
 from .relation_metrics import binary_metrics, distance_metrics
 from .trajectory_visitation import VisitationMetrics
 from .experiment_protocol import (RNG_PROTOCOL, DiffusionStreams, stream_seed, branch_rng,
-                                  audit_scratch_initialization, gradient_probe, gradient_report)
+                                  audit_scratch_initialization)
 
 
 def seed_all(seed):
@@ -159,16 +159,16 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
     mask_generator = torch.Generator().manual_seed(stream_seed(config["seed"], epoch, "mask"))
     diffusion_streams = DiffusionStreams(config["seed"], epoch, device)
     totals = {k: 0 for k in ("windows", "updates", "amp_skips", "unsupervised_windows", "action_samples",
-                             "relation_samples", "r3_positive_count", "r3_negative_count", "r3_unknown_count",
-                             "r3_distance_valid_count", "action_supervised_samples", "temporal_visible_samples",
+                             "relation_samples", "goal_relation_positive_count", "goal_relation_negative_count", "goal_relation_unknown_count",
+                             "goal_relation_distance_valid_count", "action_supervised_samples", "temporal_visible_samples",
                              "updated_action_samples", "updated_action_supervised_samples", "updated_relation_samples",
                              "updated_visitation_valid_samples")}
     objectives = []
     alpha = float(config["alpha"])
-    r3 = config.get("r3", {})
-    r1 = config.get("r1", {})
-    r1_enabled = r1.get("enabled", False)
-    visitation = VisitationMetrics(r1.get("visitation_head_trained", False), r1.get("prior_probability")) if r1_enabled else None
+    goal_relation = config.get("goal_relation", {})
+    spatial_bottleneck = config.get("spatial_bottleneck", {})
+    spatial_bottleneck_enabled = spatial_bottleneck.get("enabled", False)
+    visitation = VisitationMetrics(spatial_bottleneck.get("visitation_head_trained", False), spatial_bottleneck.get("prior_probability")) if spatial_bottleneck_enabled else None
     while True:
         window = list(itertools.islice(actions, config["gradient_accumulation_steps"]))
         if not window:
@@ -176,12 +176,12 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
         relations = [relation_stream.next() for _ in window] if relation_stream else []
         masks = [(torch.rand(len(batch[0]), generator=mask_generator) < config["goal_mask_prob"]).long() for batch in window]
         denom = window_denominators(window, masks, relations, config)
-        weight = relation_weight(successful_steps, r3.get("lambda_start", .1), r3.get("lambda_end", 1.), r3.get("warmup_steps", 500))
+        weight = relation_weight(successful_steps, goal_relation.get("lambda_start", .1), goal_relation.get("lambda_end", 1.), goal_relation.get("warmup_steps", 500))
         weights_a = {"action": 1 - alpha, "temporal": alpha}
-        if r1_enabled:
-            weights_a["visitation"] = r1["lambda_visitation"]
-        weights_r = {"reach": weight * r3.get("lambda_reach", 1.),
-                     "distance": weight * r3.get("lambda_distance", 1.)}
+        if spatial_bottleneck_enabled:
+            weights_a["visitation"] = spatial_bottleneck["lambda_visitation"]
+        weights_r = {"reach": weight * goal_relation.get("lambda_reach", 1.),
+                     "distance": weight * goal_relation.get("lambda_distance", 1.)}
         totals["windows"] += 1
         totals["action_samples"] += denom["action_samples"]
         totals["action_supervised_samples"] += denom["action_count"]
@@ -189,18 +189,15 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
         for batch in relations:
             totals["relation_samples"] += len(batch["obs_image"])
             known = batch["reach_valid"]
-            totals["r3_positive_count"] += int(((batch["reachable"] == 1) & known).sum())
-            totals["r3_negative_count"] += int(((batch["reachable"] == 0) & known).sum())
-            totals["r3_unknown_count"] += int((~known).sum())
-            totals["r3_distance_valid_count"] += int(batch["distance_valid"].sum())
+            totals["goal_relation_positive_count"] += int(((batch["reachable"] == 1) & known).sum())
+            totals["goal_relation_negative_count"] += int(((batch["reachable"] == 0) & known).sum())
+            totals["goal_relation_unknown_count"] += int((~known).sum())
+            totals["goal_relation_distance_valid_count"] += int(batch["distance_valid"].sum())
         optimizer.zero_grad(set_to_none=True)
         sums_cpu = {key: 0.0 for key in ("action", "temporal", "reach", "distance")}
-        if r1_enabled:
+        if spatial_bottleneck_enabled:
             sums_cpu["visitation"] = 0.0
         objective, backward_count = 0.0, 0
-        probe_a = probe_r = probe_v = None
-        probe_every = config.get("gradient_probe_every", 200)
-        probe = probe_every > 0 and successful_steps % probe_every == 0
         for index, (batch, mask) in enumerate(zip(window, masks)):
             microbatch = (totals["windows"] - 1) * config["gradient_accumulation_steps"] + index
             if ((denom["action_count"] and weights_a["action"] > 0)
@@ -213,10 +210,6 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                 for key, value in sums.items():
                     sums_cpu[key] += float(value.detach())
                 if loss is not None:
-                    if probe and index == 0:
-                        probe_a = gradient_probe(weighted_loss(sums, denom, {"action": 1 - alpha, "temporal": alpha}), model)
-                        if r1_enabled:
-                            probe_v = gradient_probe(weighted_loss(sums, denom, {"visitation": r1["lambda_visitation"]}), model)
                     objective += float(loss.detach())
                     scaler.scale(loss).backward()
                     backward_count += 1
@@ -228,23 +221,19 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                 for key, value in sums.items():
                     sums_cpu[key] += float(value.detach())
                 if loss is not None:
-                    if probe and index == 0:
-                        probe_r = gradient_probe(loss, model)
                     objective += float(loss.detach())
                     scaler.scale(loss).backward()
                     backward_count += 1
                 del sums, loss
         record = {"epoch": epoch, "window": totals["windows"], "successful_steps_before": successful_steps,
-                  "lambda_r3": weight, "window_denominators": denom,
+                  "lambda_goal_relation": weight, "window_denominators": denom,
                   "losses": {k: sums_cpu[k] / denom[k] if denom[k] else None for k in sums_cpu},
                   "objective": objective, "learning_rates": {g["name"]: g["lr"] for g in optimizer.param_groups}}
-        if r1_enabled:
-            record["lambda_visitation"] = r1["lambda_visitation"]
-            record["visitation_head_trained"] = r1["visitation_head_trained"]
-            if not r1["visitation_head_trained"]:
+        if spatial_bottleneck_enabled:
+            record["lambda_visitation"] = spatial_bottleneck["lambda_visitation"]
+            record["visitation_head_trained"] = spatial_bottleneck["visitation_head_trained"]
+            if not spatial_bottleneck["visitation_head_trained"]:
                 record["losses"]["visitation"] = None
-        if probe:
-            record["sampled_branch_gradients"] = gradient_report({"nomad": probe_a, "visitation": probe_v, "r3": probe_r})
         if backward_count:
             did_update, norm = optimizer_update(model, optimizer, scaler, config["max_norm"])
             record.update(did_update=did_update, grad_norm_before_clip=norm, amp_scale=scaler.get_scale())
@@ -254,7 +243,7 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
                 totals["updated_action_samples"] += denom["action_samples"]
                 totals["updated_action_supervised_samples"] += denom["action_count"]
                 totals["updated_relation_samples"] += sum(len(batch["obs_image"]) for batch in relations)
-                if r1_enabled and r1["lambda_visitation"] > 0:
+                if spatial_bottleneck_enabled and spatial_bottleneck["lambda_visitation"] > 0:
                     totals["updated_visitation_valid_samples"] += denom["visitation"]
                 ema.step(model)
                 objectives.append(objective)
@@ -270,7 +259,7 @@ def train_epoch(model, ema, optimizer, scaler, noise_scheduler, action_dataset,
     totals["mean_successful_window_objective"] = float(np.mean(objectives)) if objectives else None
     totals["relation_cycles_restarted"] = relation_stream.cycle if relation_stream else 0
     totals["relation_repeated_samples"] = max(0, totals["relation_samples"] - len(relation_dataset)) if relation_dataset is not None else 0
-    totals["r3_valid_ratio"] = ((totals["r3_positive_count"] + totals["r3_negative_count"]) / totals["relation_samples"] if totals["relation_samples"] else None)
+    totals["goal_relation_valid_ratio"] = ((totals["goal_relation_positive_count"] + totals["goal_relation_negative_count"]) / totals["relation_samples"] if totals["relation_samples"] else None)
     if visitation is not None:
         totals["visitation"] = visitation.report()
     return totals, successful_steps
@@ -308,11 +297,11 @@ def evaluate(model, action_dataset, relation_dataset, config, device, epoch):
                 diffusion_streams = DiffusionStreams(config["seed"], epoch, device, namespace="evaluation")
                 numerator_a = numerator_t = denominator_a = denominator_t = 0.0
                 sampler_metrics = []
-                r1 = config.get("r1", {})
-                visitation = (VisitationMetrics(r1.get("visitation_head_trained", False), r1.get("prior_probability"),
-                              token_permutation=r1.get("visitation_head_trained", False)
-                              and r1.get("representation", "query_tokens") != "global_condition")
-                              if r1.get("enabled", False) else None)
+                spatial_bottleneck = config.get("spatial_bottleneck", {})
+                visitation = (VisitationMetrics(spatial_bottleneck.get("visitation_head_trained", False), spatial_bottleneck.get("prior_probability"),
+                              token_permutation=spatial_bottleneck.get("visitation_head_trained", False)
+                              and spatial_bottleneck.get("representation", "query_tokens") != "global_condition")
+                              if spatial_bottleneck.get("enabled", False) else None)
                 for index, batch in enumerate(loader_for(action_dataset, config["eval_batch_size"], 0,
                                                   stream_seed(config["seed"], epoch, "eval_action"), shuffle=False)):
                     masks = ((torch.rand(len(batch[0]), generator=mask_generator) < config["goal_mask_prob"]).long() if mode == "random" else
@@ -345,7 +334,7 @@ def evaluate(model, action_dataset, relation_dataset, config, device, epoch):
             valid = np.array(collected["reach_valid"], bool)
             probabilities = torch.sigmoid(torch.tensor(collected["logit"], dtype=torch.float64)).numpy()
             result["relation"] = binary_metrics(probabilities[valid], np.array(collected["target"])[valid])
-            result["relation"].update(distance_metrics(collected, config.get("r3", {}).get("lambda_distance", 1.) > 0))
+            result["relation"].update(distance_metrics(collected, config.get("goal_relation", {}).get("lambda_distance", 1.) > 0))
     return result
 
 
@@ -412,46 +401,46 @@ def run_habitat_scratch(config):
     config["action_scale_m"] = bundle["manifest"]["action_scale_m"]
     config["action_time_step_s"] = bundle["manifest"]["action_time_step_s"]
     config["observation_stride"] = bundle["manifest"]["waypoint_spacing"]
-    r1_statistics = None
-    if config.get("r1", {}).get("enabled", False):
+    trajectory_region_statistics = None
+    if config.get("spatial_bottleneck", {}).get("enabled", False):
         from vint_train.data.trajectory_regions import load_region_statistics
-        r1 = config["r1"]
-        coefficient = float(r1.get("lambda_visitation", .1))
+        spatial_bottleneck = config["spatial_bottleneck"]
+        coefficient = float(spatial_bottleneck.get("lambda_visitation", .1))
         if not math.isfinite(coefficient) or coefficient < 0:
-            raise ValueError("r1.lambda_visitation must be finite and nonnegative")
-        if r1.get("mode", "bottleneck") == "auxiliary" and coefficient == 0:
-            raise ValueError("R1 auxiliary mode requires positive visitation supervision")
-        path = config["simulation"].get("r1_statistics")
+            raise ValueError("spatial_bottleneck.lambda_visitation must be finite and nonnegative")
+        if spatial_bottleneck.get("mode", "bottleneck") == "auxiliary" and coefficient == 0:
+            raise ValueError("SPATIAL_BOTTLENECK auxiliary mode requires positive visitation supervision")
+        path = config["simulation"].get("trajectory_region_statistics")
         if not path:
-            raise ValueError("Set simulation.r1_statistics; fit it with prepare_r1_data on train trajectories")
-        definition, fingerprint, r1_statistics = load_region_statistics(path, bundle, config)
-        r1.update(discretization=definition, statistics_sha256=fingerprint,
+            raise ValueError("Set simulation.trajectory_region_statistics; fit it with prepare_trajectory_regions on train trajectories")
+        definition, fingerprint, trajectory_region_statistics = load_region_statistics(path, bundle, config)
+        spatial_bottleneck.update(discretization=definition, statistics_sha256=fingerprint,
                   lambda_visitation=coefficient, visitation_head_trained=coefficient > 0,
-                  prior_probability=r1_statistics["visitation_prior"]["probability_flat"])
-    config.setdefault("r3", {})["label_definition"] = bundle["manifest"]["label_definition"]
-    enabled = config["r3"].get("enabled", False)
+                  prior_probability=trajectory_region_statistics["visitation_prior"]["probability_flat"])
+    config.setdefault("goal_relation", {})["label_definition"] = bundle["manifest"]["label_definition"]
+    enabled = config["goal_relation"].get("enabled", False)
     if enabled:
-        r3 = config["r3"]
+        goal_relation = config["goal_relation"]
         for key in ("lambda_reach", "lambda_distance"):
-            value = float(r3.get(key, 1.))
+            value = float(goal_relation.get(key, 1.))
             if not math.isfinite(value) or value < 0:
-                raise ValueError(f"r3.{key} must be finite and nonnegative")
-        if r3.get("lambda_reach", 1.) <= 0:
-            raise ValueError("R3 requires reachability supervision")
-        if type(r3.get("warmup_steps", 500)) is not int or r3.get("warmup_steps", 500) < 0:
-            raise ValueError("r3.warmup_steps must be a nonnegative integer")
-        relation_weight(0, r3.get("lambda_start", .1), r3.get("lambda_end", 1.), r3.get("warmup_steps", 500))
-        if not math.isfinite(float(r3.get("distance_beta", .1))) or r3.get("distance_beta", .1) <= 0:
-            raise ValueError("r3.distance_beta must be finite and positive")
-        if r3.get("lambda_distance", 1.) == 0 and r3.get("selector", {}).get("use_distance", True):
+                raise ValueError(f"goal_relation.{key} must be finite and nonnegative")
+        if goal_relation.get("lambda_reach", 1.) <= 0:
+            raise ValueError("GOAL_RELATION requires reachability supervision")
+        if type(goal_relation.get("warmup_steps", 500)) is not int or goal_relation.get("warmup_steps", 500) < 0:
+            raise ValueError("goal_relation.warmup_steps must be a nonnegative integer")
+        relation_weight(0, goal_relation.get("lambda_start", .1), goal_relation.get("lambda_end", 1.), goal_relation.get("warmup_steps", 500))
+        if not math.isfinite(float(goal_relation.get("distance_beta", .1))) or goal_relation.get("distance_beta", .1) <= 0:
+            raise ValueError("goal_relation.distance_beta must be finite and positive")
+        if goal_relation.get("lambda_distance", 1.) == 0 and goal_relation.get("selector", {}).get("use_distance", True):
             raise ValueError("R-only training must disable distance-based selection")
         rows = bundle["relations"]["train"]
         if not rows or not any(row["reachable"] is not None for row in rows):
-            raise ValueError("R3 training requires known relation labels")
+            raise ValueError("GOAL_RELATION training requires known relation labels")
         if {row["reachable"] for row in rows if row["reachable"] is not None} != {0, 1}:
-            raise ValueError("R3 training requires both reachable and certified negative examples")
-        if config["r3"].get("lambda_distance", 1.) > 0 and not any(row["distance_valid"] for row in rows):
-            raise ValueError("R3 distance loss requires verified shortest positive paths")
+            raise ValueError("GOAL_RELATION training requires both reachable and certified negative examples")
+        if config["goal_relation"].get("lambda_distance", 1.) > 0 and not any(row["distance_valid"] for row in rows):
+            raise ValueError("GOAL_RELATION distance loss requires verified shortest positive paths")
     folder = Path(config["project_folder"])
     folder.mkdir(parents=True, exist_ok=True)
     # Common parameters are constructed before the new head, for matched seeds.
@@ -474,13 +463,13 @@ def run_habitat_scratch(config):
     relation_val = GoalRelationDataset(bundle["relations"]["validation"], bundle["root"], config["image_size"]) if enabled else None
     keys = ("seed", "epochs", "lr", "weight_decay", "scheduler", "batch_size", "relation_batch_size", "gradient_accumulation_steps",
             "amp", "activation_checkpointing", "max_norm", "warmup_epochs", "num_workers", "alpha", "goal_mask_prob",
-            "distance", "action", "context_size", "len_traj_pred", "action_stats", "action_scale_m", "action_time_step_s", "observation_stride", "r3")
+            "distance", "action", "context_size", "len_traj_pred", "action_stats", "action_scale_m", "action_time_step_s", "observation_stride", "goal_relation")
     spec = {key: copy.deepcopy(config.get(key)) for key in keys}
     spec.update(initialization="scratch", epoch_basis="action_dataset", sampler_version=2,
                 rng_protocol=RNG_PROTOCOL,
                 normalization="window_sums; nomad_count+0.01B; relation_valid_count", lr_start_factor=.1)
-    if config.get("r1", {}).get("enabled", False):
-        spec["r1"] = copy.deepcopy(config["r1"])
+    if config.get("spatial_bottleneck", {}).get("enabled", False):
+        spec["spatial_bottleneck"] = copy.deepcopy(config["spatial_bottleneck"])
         spec["normalization"] += "; visitation_valid_sample_count"
     epoch_start = successful_steps = 0
     if config.get("resume_from"):
@@ -489,28 +478,28 @@ def run_habitat_scratch(config):
     (folder / "resolved_config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
     (folder / "dataset_manifest.json").write_text(json.dumps({"manifest": bundle["manifest"],
                                                             "files": bundle["file_hashes"]}, indent=2, allow_nan=False))
-    if r1_statistics is not None:
-        (folder / "r1_statistics.json").write_text(json.dumps(r1_statistics, indent=2, allow_nan=False) + "\n")
+    if trajectory_region_statistics is not None:
+        (folder / "trajectory_region_statistics.json").write_text(json.dumps(trajectory_region_statistics, indent=2, allow_nan=False) + "\n")
     compatibility_only = [n for n, _ in model.named_parameters() if ".sa_layer." in n or "._fc." in n]
-    inactive_r1 = []
-    if config.get("r1", {}).get("enabled", False):
-        r1 = config["r1"]
+    inactive_spatial_bottleneck = []
+    if config.get("spatial_bottleneck", {}).get("enabled", False):
+        spatial_bottleneck = config["spatial_bottleneck"]
         prefixes = []
-        if r1.get("mode", "bottleneck") == "auxiliary":
+        if spatial_bottleneck.get("mode", "bottleneck") == "auxiliary":
             prefixes.extend(("condition_query.", "readout_attention.", "residual_projection."))
-        if not r1["visitation_head_trained"]:
+        if not spatial_bottleneck["visitation_head_trained"]:
             prefixes.extend(("visitation_context.", "visitation_head."))
-        inactive_r1 = ["vision_encoder.spatial_bottleneck." + name for name, _ in
+        inactive_spatial_bottleneck = ["vision_encoder.spatial_bottleneck." + name for name, _ in
                        model.vision_encoder.spatial_bottleneck.named_parameters() if name.startswith(tuple(prefixes))]
     (folder / "provenance.json").write_text(json.dumps({"data_fingerprint": bundle["fingerprint"],
         **initialization_audit,
         "training_spec": spec, "model_config": model._model_config,
         "compatibility_parameters_not_used_in_forward": compatibility_only,
-        "r1_ablation_parameters_without_task_loss": inactive_r1,
+        "spatial_bottleneck_ablation_parameters_without_task_loss": inactive_spatial_bottleneck,
         "parameter_counts": {"total": sum(p.numel() for p in model.parameters()),
             "by_optimizer_group": {g["name"]: sum(p.numel() for p in g["params"]) for g in optimizer.param_groups},
             "excluding_known_unused": sum(p.numel() for n, p in model.named_parameters()
-                                            if n not in set(compatibility_only + inactive_r1))},
+                                            if n not in set(compatibility_only + inactive_spatial_bottleneck))},
         "resume_from": config.get("resume_from"), "torch_version": torch.__version__}, indent=2))
     for epoch in range(epoch_start, config["epochs"]):
         started = time.monotonic()
